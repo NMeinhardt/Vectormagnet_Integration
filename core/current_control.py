@@ -7,7 +7,7 @@
 #         gmaxwell at student.ethz.ch
 #
 # Date: 13.01.2021
-# latest update: 12.02.2021
+# latest update: 23.03.2021
 
 import os.path as path
 import sys
@@ -18,12 +18,12 @@ from time import sleep, time
 import numpy as np
 
 try:
-    from IT6432.it6432connection import IT6432Connection
+    from core.it6432connection import IT6432Connection
 except BaseException:
     pass
 finally:
     sys.path.insert(1, path.join(sys.path[0], '..'))
-    from IT6432.it6432connection import IT6432Connection
+    from core.it6432connection import IT6432Connection
 
 
 class PowerSupplyCommands(object):

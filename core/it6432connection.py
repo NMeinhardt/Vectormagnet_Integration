@@ -11,8 +11,6 @@
 import socket
 from time import sleep, time
 
-# from qs3.utils import logger
-
 
 class ErrorBase(Exception):
     def __init__(self, code, *args, **kwargs):

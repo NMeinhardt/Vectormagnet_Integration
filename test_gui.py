@@ -1,8 +1,3 @@
-"""
-Simple vector magnet control GUI.
-Some sections copied from https://www.learnpyqt.com/tutorials/multithreading-pyqt-applications-qthreadpool/.
-last update: 25.02.21
-"""
 
 # imports
 import os
@@ -25,14 +20,9 @@ from PyQt5.QtWidgets import (QApplication, QCheckBox, QFormLayout, QFrame,
 from core.current_control import PowerSupplyCommands
 from core.field_current_tr import (computeCoilCurrents,
                                    computeMagneticFieldVector)
-from IT6432.it6432connection import IT6432Connection
-
-#from qs3.utils import logger
 
 
 # %%
-
-
 class WorkerSignals(QObject):
     '''
     Defines the signals available from a running worker thread.
@@ -451,8 +441,9 @@ class VectorMagnetDialog(QWidget):
         self.msg_values.setText(f'setting field ({magnitude} mT, {theta}°, {phi}°)')
         # TODO: uncomment lines 448-464
         # get magnetic field in Cartesian coordinates
-        # B_fieldVector = computeMagneticFieldVector(magnitude, theta, phi)
-        # currents = computeCoilCurrents(B_fieldVector)
+        B_fieldVector = computeMagneticFieldVector(magnitude, theta, phi)
+        currents = computeCoilCurrents(B_fieldVector)
+        print(f'required currents: {currents} mA')
 
         # try:
         #     if demagnetize:
