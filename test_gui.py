@@ -2,17 +2,13 @@
 # imports
 import os
 import sys
-import threading
 import traceback
 from datetime import datetime
 from time import sleep, time
-
-import matplotlib as mpl
 import numpy as np
-from matplotlib.backends.backend_agg import FigureCanvasAgg
 from PyQt5 import QtGui
 from PyQt5.QtCore import (QObject, QRunnable, Qt, QThreadPool, pyqtSignal,
-                          pyqtSlot)
+                          pyqtSlot, QTimer)
 from PyQt5.QtWidgets import (QApplication, QCheckBox, QFormLayout, QFrame,
                              QGridLayout, QHBoxLayout, QLabel, QLineEdit,
                              QMainWindow, QPushButton, QVBoxLayout, QWidget)
@@ -26,71 +22,6 @@ from core.backend_base import MAGNET_STATE as MagnetState
 
 
 # %%
-class WorkerSignals(QObject):
-    '''
-    Defines the signals available from a running worker thread.
-
-    Supported signals are:
-
-    finished
-        No data
-
-    error
-        tuple (exctype, value, traceback.format_exc() )
-
-    result
-        object data returned from processing, anything
-
-    progress
-        int indicating % progress
-
-    '''
-    finished = pyqtSignal()
-    error = pyqtSignal(tuple)
-    result = pyqtSignal(object)
-
-
-class Worker(QRunnable):
-    '''
-    Worker thread
-
-    Inherits from QRunnable to handle worker thread setup, signals and wrap-up.
-
-    :param callback: The function callback to run on this worker thread. Supplied args and
-                     kwargs will be passed through to the runner.
-    :type callback: function
-    :param args: Arguments to pass to the callback function
-    :param kwargs: Keywords to pass to the callback function
-    '''
-
-    def __init__(self, fn, *args, **kwargs):
-        super(Worker, self).__init__()
-
-        # Store constructor arguments (re-used for processing)
-        self.fn = fn
-        self.args = args
-        self.kwargs = kwargs
-        self.signals = WorkerSignals()
-
-    @pyqtSlot()
-    def run(self):
-        '''Initialise the runner function with passed args, kwargs.'''
-
-        # Retrieve args/kwargs here; and fire processing using them
-        try:
-            result = self.fn(*self.args, **self.kwargs)
-        except BaseException:
-            traceback.print_exc()
-            exctype, value = sys.exc_info()[:2]
-            self.signals.error.emit((exctype, value, traceback.format_exc()))
-        else:
-            if result is not None:
-                self.signals.result.emit(result)  # Return the result of the processing
-        finally:
-            self.signals.finished.emit()  # Done
-
-
-
 class VectorMagnetDialog(QWidget):
     """
     Window of GUI for controlling the vector magnet.
@@ -116,6 +47,10 @@ class VectorMagnetDialog(QWidget):
 
         self.threads = QThreadPool()
 
+        # initialize timers and interval
+        self.currentUpdateTimer = QTimer()
+        self.currentUpdateIntervals = 1000
+
         # set up widgets, layouts and events
         self._init_widgets()
         self._init_layout()
@@ -127,8 +62,11 @@ class VectorMagnetDialog(QWidget):
 
     def __exit__(self, exc_type, exc_value, traceback):
         """ Ensure that connection to channels is closed. """
-        # self.commander.close_connection()
         self.backend.disable_field()
+
+        # switch off QTimer for updating currents
+        # self.currentUpdateTimer.stop()
+
         print('connection closed.')
 
 
@@ -184,9 +122,9 @@ class VectorMagnetDialog(QWidget):
         """ Initialise container's widget layout. """
         # Set layout of upper part related to field and current values
         upperLayout = QGridLayout()
-        upperLayout.addWidget(QLabel('enter B Vector:'), 0, 1)
-        upperLayout.addWidget(QLabel('B field Setpoint:'), 0, 2)
-        upperLayout.addWidget(QLabel('Current Setpoint:'), 0, 4)
+        upperLayout.addWidget(QLabel('Enter B Vector:'), 0, 1)
+        upperLayout.addWidget(QLabel('B-field Setpoint:'), 0, 2)
+        upperLayout.addWidget(QLabel('Applied Currents:'), 0, 4)
         for i in range(3):
             upperLayout.addWidget(self.polarCoordsLabels[i], i + 1, 0)
             upperLayout.addWidget(self.polarCoordsLineEdit[i], i + 1, 1)
@@ -232,10 +170,14 @@ class VectorMagnetDialog(QWidget):
         self.coordinateSystemButton.clicked.connect(self.on_coord_system_button_click)
         self.setFieldValuesButton.clicked.connect(self.on_set_values_button_click)
         self.setFieldButton.clicked.connect(self.on_switch_on_field)
+        self.demagnetizeCheckBox.stateChanged.connect(self.on_demagnetization_check_button_change)
 
         # Backend initiated events
         self.backend.on_current_change.connect(self.on_backend_current_change)
         self.backend.on_field_status_change.connect(self.on_backend_status_change)
+
+        # Timer initiated events
+        self.currentUpdateTimer.timeout.connect(self.on_timer_current_update)
 
     def on_coord_system_button_click(self):
         """Open pop up window for coordinate screen"""
@@ -286,11 +228,6 @@ class VectorMagnetDialog(QWidget):
         self.labelMessages.setText('enabling field')
         self.backend.enable_field()
 
-        # update the currents continuously
-        current_updater = Worker(self.contCurrentFetch)
-        current_updater.signals.error.connect(self.updateErrorMessage)
-
-        self.threads.start(current_updater)
 
     def on_switch_off_field(self):
         """ Switch off vector magnet.
@@ -309,8 +246,20 @@ class VectorMagnetDialog(QWidget):
 
         """
         self.labelMessages.setText('read current values')
+        self._update_current_labels(currents)
 
-        # update displayed currents
+    def on_timer_current_update(self):
+        """Measure applied currents and update label values.
+
+        """
+        self.labelMessages.setText('read current values')
+        currents = self.backend.get_currents()
+        self._update_current_labels(currents)
+
+    def _update_current_labels(self, currents):
+        """Update displayed currents with provided values
+
+        """
         text = [f'{currents[0]:.3f} A',
                     f'{currents[1]:.3f} A',
                     f'{currents[2]:.3f} A']
@@ -321,6 +270,7 @@ class VectorMagnetDialog(QWidget):
         """Update fieldStatusLabel according to new state.
 
         """
+        print('backend status change')
         if status == MagnetState.ON:
             # update fieldStatusLabel to have green background
             height = self.fieldStatusLabel.size().height()
@@ -337,6 +287,9 @@ class VectorMagnetDialog(QWidget):
                 pass
             self.setFieldButton.clicked.connect(self.on_switch_off_field)
 
+            # switch on QTimer for updating currents
+            self.currentUpdateTimer.start(self.currentUpdateIntervals)
+
         else:
             # update fieldStatusLabel to have gray background
             self.fieldStatusLabel.setStyleSheet('inset grey; min-height: 30px;')
@@ -350,6 +303,9 @@ class VectorMagnetDialog(QWidget):
                 pass
             self.setFieldButton.clicked.connect(self.on_switch_on_field)
             self.setFieldButton.setEnabled(True)
+
+            # switch off QTimer for updating currents
+            self.currentUpdateTimer.stop()
 
         # also update currents
         currents = self.backend.get_currents()
@@ -401,28 +357,8 @@ class VectorMagnetDialog(QWidget):
 
         return mask_validity
 
-    def _DisplayCurrents(self):
-        """This method is for displaying measured current values from the IT6432."""
 
-        currents = self.backend.get_currents()
 
-        if self.backend.get_magnet_status() == MagnetState.ON:
-            text = [f'{currents[0]:.3f} A',
-                    f'{currents[1]:.3f} A',
-                    f'{currents[2]:.3f} A']
-        else:
-            text = ['0.000 A',
-                    '0.000 A',
-                    '0.000 A']
-        for i in range(len(text)):
-            self.setpointCurrentLabels[i].setText(text[i])
-
-    def contCurrentFetch(self):
-        """continuously fetch current measurements from IT6432"""
-
-        while self.backend.get_magnet_status() == MagnetState.ON:
-            self._DisplayCurrents()
-            sleep(0.8)
 
 class CoordinatesPopUp(QWidget):
     """UI Widget: Pop up window for depicting graphically the coordinate system.
