@@ -286,14 +286,6 @@ class VectorMagnetDialog(QWidget):
         self.labelMessages.setText('enabling field')
         self.backend.enable_field()
 
-        # re-define button for switching on/off magnet
-        self.setFieldButton.setText('switch off field')
-        try:
-            self.setFieldButton.clicked.disconnect()
-        except BaseException:
-            pass
-        self.setFieldButton.clicked.connect(self.on_switch_off_field)
-
         # update the currents continuously
         current_updater = Worker(self.contCurrentFetch)
         current_updater.signals.error.connect(self.updateErrorMessage)
@@ -303,19 +295,8 @@ class VectorMagnetDialog(QWidget):
     def on_switch_off_field(self):
         """ Switch off vector magnet.
         """
-
-        # update variables
         self.labelMessages.setText('disabling field')
         self.backend.disable_field()
-
-        # re-define button for switching on/off magnet
-        self.setFieldButton.setText('switch on field')
-        try:
-            self.setFieldButton.clicked.disconnect()
-        except BaseException:
-            pass
-        self.setFieldButton.clicked.connect(self.on_switch_on_field)
-        self.setFieldButton.setEnabled(True)
 
     def on_demagnetization_check_button_change(self):
         """Pass new state of checkbox to backend.
@@ -340,16 +321,35 @@ class VectorMagnetDialog(QWidget):
         """Update fieldStatusLabel according to new state.
 
         """
-        # update fieldStatusLabel, either green or gray
         if status == MagnetState.ON:
+            # update fieldStatusLabel to have green background
             height = self.fieldStatusLabel.size().height()
             self.fieldStatusLabel.setStyleSheet(f"""background-color: lime;
                                                 inset grey;
                                                 height: {height}px;""")
             self.fieldStatusLabel.setText('on')
+
+            # re-define button for switching on/off magnet
+            self.setFieldButton.setText('switch off field')
+            try:
+                self.setFieldButton.clicked.disconnect()
+            except BaseException:
+                pass
+            self.setFieldButton.clicked.connect(self.on_switch_off_field)
+
         else:
+            # update fieldStatusLabel to have gray background
             self.fieldStatusLabel.setStyleSheet('inset grey; min-height: 30px;')
             self.fieldStatusLabel.setText('off')
+
+            # re-define button for switching on/off magnet
+            self.setFieldButton.setText('switch on field')
+            try:
+                self.setFieldButton.clicked.disconnect()
+            except BaseException:
+                pass
+            self.setFieldButton.clicked.connect(self.on_switch_on_field)
+            self.setFieldButton.setEnabled(True)
 
         # also update currents
         currents = self.backend.get_currents()
