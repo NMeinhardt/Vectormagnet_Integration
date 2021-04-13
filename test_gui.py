@@ -162,8 +162,6 @@ class VectorMagnetDialog(QWidget):
         """
         Initialise container's event handlers.
         """
-        # Backend initiated events
-
         # User initiated events
         for input_field in self.polarCoordsLineEdit:
             input_field.returnPressed.connect(self.on_set_values_button_click)
