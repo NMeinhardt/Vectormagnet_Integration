@@ -7,6 +7,7 @@ model_poly3_latest_B2I_old.sav
 model_poly3_latest_I2B_old.sav
 model_poly3_newSensorData_B2I_old.sav
 model_poly3_newSensorData_B2I_old.sav
+test.py
 
 venvECB_new/
 .env
