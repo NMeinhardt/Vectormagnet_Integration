@@ -19,7 +19,8 @@ class MagnetBackendBase(QObject):
     
     """
     # Event: current change.
-    on_current_change = pyqtSignal(np.ndarray)
+    on_current_change_all = pyqtSignal(np.ndarray)
+    on_current_change_single = pyqtSignal(float, int)
 
     # Event: current change.
     on_field_status_change = pyqtSignal(MAGNET_STATE)

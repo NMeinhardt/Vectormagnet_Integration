@@ -45,7 +45,7 @@ class DummyMagnetBackend(MagnetBackendBase):
         self._setpoint_currents = values
 
         if self._magnet_state == MagnetState.ON:
-            self.on_current_change.emit(self.get_currents())
+            self.on_current_change_all.emit(self.get_currents())
             self._ramp_to_new_current_values(self._setpoint_currents)
 
         
@@ -87,7 +87,7 @@ class DummyMagnetBackend(MagnetBackendBase):
         """Ramp output current from the currently set current values to a new target value. 
 
         :param target_currents: Current values to be set.
-        :param emit_signals_flag (optional): If True the self.on_current_change signal is emitted after each step.
+        :param emit_signals_flag (optional): If True the self.on_current_change_single signal is emitted after each step.
             This flag is intented to be used when disabling the magnet, since current updates should be switched off 
             when the magnet is off, but the process of driving the currents to zero should still be monitored.
         """
@@ -105,12 +105,9 @@ class DummyMagnetBackend(MagnetBackendBase):
         
         # if desired, pass the on_current_change attribute to the individual threads
         if emit_signals_flag:
-            signal = self.on_current_change
+            signal = self.on_current_change_single
         else:
             signal = None
-
-        # measure currently set output current
-        initial_currents = self.get_currents()
 
         # initialize threads that ramp current from initial to final value
         for i in range(3):
@@ -128,7 +125,7 @@ class DummyMagnetBackend(MagnetBackendBase):
 class CurrentRampingThread(threading.Thread):
     """Thread class that ramps the currents stored in an array from initial to final values. 
     The class has a stop method, which invokes an early but secure termination after finishing 
-    the the currently executed ramping step.  
+    the currently executed ramping step.  
 
     """
     def __init__(self, target_array : np.ndarray, channel : int, target_value : float, 
@@ -141,7 +138,7 @@ class CurrentRampingThread(threading.Thread):
         :param channel: Channel number, which is the index of target_array at which the current value should be updated.
         :param initial_value: Initial current value which is currently set
         :param number_steps (optional): Number of steps used for ramping.
-        :param signal (optional): pyqtSignal to emit after each step. The signal argument must be of type np.array.
+        :param signal (optional): pyqtSignal to emit after each step. The signal argument must be of types (float, int).
         :param demagnetization_flag (optional): If flag is True, a demagnetization procedure is applied to the coi prior to ramping.
         """
         super().__init__(*args, **kwargs)
@@ -164,7 +161,7 @@ class CurrentRampingThread(threading.Thread):
         the current ramping step is finalized and the thread will be terminated before starting the next ramping step. 
         """
         # if desired run the demagnetization procedure first
-        if self._demagnetization_flag and not np.all(np.isclose(0, self._target_array[self._channel])):
+        if self._demagnetization_flag and not np.isclose(0, self._target_array[self._channel]):
             self._demagnetization_procedure()
 
         # estimate current distance to target and set step size
@@ -183,7 +180,7 @@ class CurrentRampingThread(threading.Thread):
 
             # send a signal with array of current values as arguments if provided
             if self._signal is not None:
-                self._signal.emit(self._target_array)
+                self._signal.emit(self._target_array[self._channel], self._channel)
 
             # wait for the hardware to execute the task
             sleep(sleep_duration)
@@ -225,7 +222,7 @@ class CurrentRampingThread(threading.Thread):
 
                 # send a signal with array of current values as arguments if provided
                 if self._signal is not None:
-                    self._signal.emit(self._target_array)
+                    self._signal.emit(self._target_array[self._channel], self._channel)
 
                 # add an artificial sleep to mimic the hardware's latency
                 sleep(sleep_duration)

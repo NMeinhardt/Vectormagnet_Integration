@@ -124,13 +124,13 @@ class VectorMagnetDialog(QWidget):
         upperLayout = QGridLayout()
         upperLayout.addWidget(QLabel('Enter B Vector:'), 0, 1)
         upperLayout.addWidget(QLabel('B-field Setpoint:'), 0, 2)
-        upperLayout.addWidget(QLabel('Applied Currents:'), 0, 4)
+        upperLayout.addWidget(QLabel('Applied Currents:'), 0, 3, 1, 2)
         for i in range(3):
             upperLayout.addWidget(self.polarCoordsLabels[i], i + 1, 0)
             upperLayout.addWidget(self.polarCoordsLineEdit[i], i + 1, 1)
             upperLayout.addWidget(self.setpointBLabels[i], i + 1, 2)
             upperLayout.addWidget(self.currentsLabels[i], i + 1, 3)
-            upperLayout.addWidget(self.setpointCurrentLabels[i], i + 1, 4)
+            upperLayout.addWidget(self.setpointCurrentLabels[i], i + 1, 4, alignment = Qt.AlignRight)
         
         # Set layout of lower part related to switching on/off field and displaying coordinate system
         fieldControlBoxLayout = QVBoxLayout()
@@ -171,16 +171,19 @@ class VectorMagnetDialog(QWidget):
         self.demagnetizeCheckBox.stateChanged.connect(self.on_demagnetization_check_button_change)
 
         # Backend initiated events
-        self.backend.on_current_change.connect(self.on_backend_current_change)
+        self.backend.on_current_change_all.connect(self.on_backend_current_change_all)
+        self.backend.on_current_change_single.connect(self.on_backend_current_change_single)
         self.backend.on_field_status_change.connect(self.on_backend_status_change)
 
         # Timer initiated events
         self.currentUpdateTimer.timeout.connect(self.on_timer_current_update)
 
+
     def on_coord_system_button_click(self):
         """Open pop up window for coordinate screen"""
         self.w = CoordinatesPopUp(self.image_path_coord_system)
         self.w.show()
+
 
     def on_set_values_button_click(self):
         """Read input coordinates, check their validity and prepare to be set on the vector magnet."""
@@ -219,6 +222,7 @@ class VectorMagnetDialog(QWidget):
             if self.backend.get_magnet_status() == MagnetState.OFF:
                 self.setFieldButton.setDisabled(True)
 
+
     def on_switch_on_field(self):
         """Switch on vector magnet and set field values that are currently set as class variables.
         """
@@ -233,18 +237,30 @@ class VectorMagnetDialog(QWidget):
         self.labelMessages.setText('disabling field')
         self.backend.disable_field()
 
+
     def on_demagnetization_check_button_change(self):
         """Pass new state of checkbox to backend.
 
         """
         self.backend.set_demagnetization_flag(self.demagnetizeCheckBox.isChecked())
 
-    def on_backend_current_change(self, currents: np.ndarray):
+
+    def on_backend_current_change_all(self, currents: np.ndarray):
         """Update labels with new current values.
 
         """
         self.labelMessages.setText('read current values')
         self._update_current_labels(currents)
+    
+
+    def on_backend_current_change_single(self, current: float, channel: int):
+        """Update a single label with new current values.
+
+        """
+        self.labelMessages.setText('read current values')
+        text = f'{current:.3f} A'
+        self.setpointCurrentLabels[channel].setText(text)  
+
 
     def on_timer_current_update(self):
         """Measure applied currents and update label values.
@@ -253,6 +269,7 @@ class VectorMagnetDialog(QWidget):
         self.labelMessages.setText('read current values')
         currents = self.backend.get_currents()
         self._update_current_labels(currents)
+
 
     def _update_current_labels(self, currents):
         """Update displayed currents with provided values
@@ -307,7 +324,8 @@ class VectorMagnetDialog(QWidget):
 
         # also update currents
         currents = self.backend.get_currents()
-        self.on_backend_current_change(currents)
+        self.on_backend_current_change_all(currents)
+
 
     def updateErrorMessage(self, args):
         """
@@ -322,6 +340,7 @@ class VectorMagnetDialog(QWidget):
         with open('GUI_exceptions.log', 'a') as logfile:
             logfile.write(f"{datetime.now().strftime('%d-%m-%y_%H:%M:%S')}: "
                           f"{args[0]}, {args[1]}\n{args[2]}\n")
+
 
     @staticmethod
     def valid_inputs(values):
@@ -356,8 +375,6 @@ class VectorMagnetDialog(QWidget):
         return mask_validity
 
 
-
-
 class CoordinatesPopUp(QWidget):
     """UI Widget: Pop up window for depicting graphically the coordinate system.
 
@@ -377,10 +394,6 @@ class CoordinatesPopUp(QWidget):
         pixmap_scaled = pixmap.scaled(750, 750, Qt.KeepAspectRatio)
         label.setPixmap(pixmap_scaled)
         self.resize(pixmap_scaled.width(), pixmap_scaled.height())
-
-
-
-
 
 
 if __name__ == '__main__':
