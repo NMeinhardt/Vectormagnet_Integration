@@ -1,22 +1,10 @@
-# filename: it6432_connection.py
-#
-# Class for communication with IT6432 power supplies
-#
-# Author: Maxwell Guerne-Kieferndorf (with QZabre)
-#         gmaxwell at student.ethz.ch
-#
-# Date: 15.01.2021
-# latest update: 09.02.2021
 
 import socket
 from time import sleep, time
 
 
 class ITPowerSupplyDriver:
-    """
-    An interface for communication with IT 6432 current sources.
-    The IP address/source port can be changed by reprogramming the devices, although there
-    should be no need to do this.
+    """ITECH IT6432 bipolar DC power supply driver wrapper.
 
     """
 
@@ -256,10 +244,6 @@ class ITPowerSupplyDriver:
         """Closes the socket connection
         """
         self._sock.close()
-
-    #-------------------------------------------------------#
-    #------------------ Utility functions ------------------#
-    #-------------------------------------------------------#
 
     def getMaxMinOutput(self) -> tuple:
         """Get maximum/minimum current/voltage values for each current channel.

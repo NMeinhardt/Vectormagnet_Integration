@@ -1,29 +1,11 @@
-# filename: current_control.py
-#
-# This code is meant to bundle the communication with the IT6432 current sources
-# and control the current flow/change of configurations for each of the PSUs.
-#
-# Author: Maxwell Guerne-Kieferndorf (QZabre)
-#         gmaxwell at student.ethz.ch
-# Date: 13.01.2021
-# latest update: 23.03.2021
-
-import os.path as path
-import sys
 import threading
-import traceback
-from time import sleep, time
 import numpy as np
+from time import sleep
+from PyQt5.QtCore import pyqtSignal
 
-try:
-    from core.itech_driver import ITPowerSupplyDriver
-except BaseException:
-    pass
-finally:
-    sys.path.insert(1, path.join(sys.path[0], '..'))
-    from core.itech_driver import ITPowerSupplyDriver
-    from core.backend_base import MagnetBackendBase
-    from core.backend_base import MAGNET_STATE as MagnetState
+from core.itech_driver import ITPowerSupplyDriver
+from core.backend_base import MagnetBackendBase
+from core.backend_base import MAGNET_STATE as MagnetState
 
 
 class ElectroMagnetBackend(MagnetBackendBase):
@@ -37,8 +19,8 @@ class ElectroMagnetBackend(MagnetBackendBase):
         """Instance constructor.
 
         :param ramp_num_steps: number of steps when ramping currents.
-  
         """
+        super().__init__()
 
         # Initialise state.
         self._setpoint_currents = np.array([0, 0, 0], dtype=float)
@@ -55,11 +37,17 @@ class ElectroMagnetBackend(MagnetBackendBase):
 
         # connect to power supplies
         self.power_supplies = np.empty(3, dtype= ITPowerSupplyDriver)
-        for i in range(1,4):
-            self.power_supplies[i-1] = ITPowerSupplyDriver(i,   self.IPs[i], 
+        for i in range(3):
+            self.power_supplies[i] = ITPowerSupplyDriver(i,   self.IPs[i], 
                                                                 self.port, 
                                                                 self.maxCurrent, 
                                                                 self.maxVoltage)
+
+        # thread pool for ramping
+        self.ramping_threads = np.empty(3, dtype = CurrentRampingHardwareThread)
+
+        # open connection to power supplies
+        self.open_connection()
 
     @property
     def ramp_num_steps(self) -> int:
@@ -69,13 +57,6 @@ class ElectroMagnetBackend(MagnetBackendBase):
     def ramp_num_steps(self, num_steps: int):
         self._ramp_num_steps = num_steps
 
-    @property
-    def setCurrentValues(self) -> list:
-        return self._setpoint_currents
-
-    @setCurrentValues.setter
-    def setCurrentValues(self, currents: list):
-        self._setpoint_currents = currents
 
     def open_connection(self):
         """Open a connection to each IT6432 current source.
@@ -83,7 +64,8 @@ class ElectroMagnetBackend(MagnetBackendBase):
         for channel in self.power_supplies:
             channel.connect()
             channel.set_operation_mode('remote')
-
+    
+    
     def close_connection(self):
         """Close the connection with the current sources.
         """
@@ -91,203 +73,293 @@ class ElectroMagnetBackend(MagnetBackendBase):
             channel.set_operation_mode('local')
             channel.close()
 
+            
+    def get_currents(self) -> np.ndarray:
+        """Returns measured currents of power supplies.
+
+        """
+        if self._magnet_state == MagnetState.ON:
+            currents = np.array([self.power_supplies[i].get_current() for i in range(3)])
+        else:
+            currents = np.zeros(3)
+        
+        return np.round(currents, 3)
+
+
     def set_currents(self, values: np.ndarray):
         """Sets the currents of power supplies.
 
         :param values: Current values to be set.
         """
-        thread_pool = []
-
-        signs = np.sign(values)
-
-        for ix, power_supply in enumerate(self.power_supplies):
-            des_current_ix = (signs[ix] * values[ix]
-                              if abs(values[ix]) <= power_supply.current_lim
-                              else power_supply.current_lim)
-            # conservative estimate of coil resistance: 0.472 ohm -> ensure current compliance
-            # (actual value is probably closer to 0.46)
-            v_set_ix = signs[ix] * 0.48 * des_current_ix
-            worker_ix = VoltageRamper(power_supply, v_set_ix, des_current_ix, self.ramp_num_steps)
-            thread_pool.append(worker_ix)
-
-        for thread in thread_pool:
-            thread.start()
-        for thread in thread_pool:
-            thread.join()
-
         self._setpoint_currents = values
 
-    def _demagnetize_coils(self, current_config: list = [1, 1, 1], steps: int = 5):
-        """Eliminate hysteresis effects by applying a slowly oscillating and decaying
-        (triangle wave) voltage to the coils.
+        if self._magnet_state == MagnetState.ON:
+            self.on_current_change_all.emit(self.get_currents())
+            self._ramp_to_new_current_values(self._setpoint_currents)
+            
 
-        :param current_config: Initial configuration before ramping down the voltage.
-        :type cmd: list, optional
-        :param steps: Number of voltage increments used when ramping voltage back and forth.
-        :type steps: int, optional
-
+    def enable_field(self):
+        """Enables magnetic field.
         """
-        points = np.array([0.2, 1, 2, 3, 4, 5, 6, 7, 8])
-        bounds = 0.475 * np.outer(current_config, np.exp(-0.7 * points))
+        # ramp to setpoint currents, note that demagnetization and enabling of outputs are handled implicitly
+        self._ramp_to_new_current_values(self._setpoint_currents)
+        
+        self._magnet_state = MagnetState.ON
+        self.on_field_status_change.emit(MagnetState.ON)
 
-        for power_supply in self.power_supplies:
-            power_supply.set_current(5.01)
 
-        thread_pool = [None, None, None]
-        target_func = rampVoltageSimple
-        sign = 1
+    def disable_field(self):
+        """Disables magnetic field.
+        """
+        # ramp currents down to zero, note that demagnetization is handled implicitly
+        self._ramp_to_new_current_values(np.zeros(3, dtype=float))
 
-        for i in range(bounds.shape[1]):
-            voltages = []
-            sign *= -1
+        # disable outputs of current supplies
+        [self.power_supplies[i].disable_output() for i in range(3)]
 
-            for ix, power_supply in enumerate(self.power_supplies):
-                voltages.append(power_supply.get_voltage())
-                kwargs_ix = {'steps': steps,
-                             'set_voltage': voltages[ix], 'new_voltage': sign * bounds[ix, i]}
+        self._magnet_state = MagnetState.OFF
+        self.on_field_status_change.emit(MagnetState.OFF)
 
-                thread_pool[ix] = threading.Thread(target=target_func,
-                                                   name=f'VoltageRamper_{ix + 1}',
-                                                   args=(power_supply,),
-                                                   kwargs=kwargs_ix)
 
-            for thread in thread_pool:
-                thread.start()
+    def get_magnet_status(self) -> MagnetState:
+        """Returns status of magnet.
+        """
+        return self._magnet_state
 
-            for thread in thread_pool:
+
+    def set_demagnetization_flag(self, flag: bool):
+        """Sets the demagnetization flag.
+        """
+        self._demagnetization_flag = flag
+
+
+    def _ramp_to_new_current_values(self, target_currents: np.ndarray, emit_signals_flag = False):
+        """Ramp output current from the currently set current values to a new target value. 
+
+        :param target_currents: Current values to be set.
+        :param emit_signals_flag (optional): If True the self.on_current_change_single signal is emitted after each step.
+            This flag is intented to be used when disabling the magnet, since current updates should be switched off 
+            when the magnet is off, but the process of driving the currents to zero should still be monitored.
+        """
+        try:
+            # if threads are still running, initiate early stop by setting stop
+            for thread in self.ramping_threads:
+                if thread.is_alive():
+                    thread.stop()
+
+            # wait until all threads have exited 
+            for thread in self.ramping_threads:
                 thread.join()
+        except AttributeError:
+            pass
+        
+        # if desired, pass the on_current_change_single attribute to the individual threads
+        if emit_signals_flag:
+            signal = self.on_current_change_single
+        else:
+            signal = None
 
-            sleep(0.1)
+        # initialize threads that ramp current from initial to final value
+        for i in range(3):
+            self.ramping_threads[i] = CurrentRampingHardwareThread(self.power_supplies[i], target_currents[i], 
+                                            number_steps = self.ramp_num_steps, signal=signal,
+                                            demagnetization_flag = self._demagnetization_flag)
 
-        self.disableCurrents()
-
-    def disableCurrents(self):
-        """Disable current controllers.
-        """
-        thread_pool = []
-
-        for power_supply in self.power_supplies:
-            worker_ix = VoltageRamper(power_supply, 0, 0, self.ramp_num_steps)
-            thread_pool.append(worker_ix)
-
-        for thread in thread_pool:
+        # start the threads
+        no_running_threads_ini = threading.active_count()
+        for thread in self.ramping_threads:
             thread.start()
-        for thread in thread_pool:
-            thread.join()
+        print(f'running threads before: {no_running_threads_ini} now: {threading.active_count()}')
 
 
-class VoltageRamper(threading.Thread):
-    """A thread that simply runs the function rampVoltage. Enables parallel operation of
-    power supplies.
+
+class CurrentRampingHardwareThread(threading.Thread):
+    """Thread class that ramps the output current of a single power supply from an initial to 
+    the provided final value. The class has a stop method, which invokes an early but secure termination 
+    after finishing the currently executed ramping step.  
 
     """
-
-    def __init__(self, connection: ITPowerSupplyDriver, 
-                new_voltage: float, new_current: float, steps: int):
+    def __init__(self, device : ITPowerSupplyDriver, target_current : float, 
+                    signal : pyqtSignal = None, demagnetization_flag = False,
+                    number_steps: int = 5, *args, **kwargs):
         """
         Instance constructor.
         
-        :param connection: Current source which is to be controlled
-        :type connection: ITPowerSupplyDriver
-        :param new_voltage: Target voltage
-        :param new_current: Target current
-        :param step_size: Number of steps to increase voltage. Fewer -> faster ramp
+        :param device: driver for respective power supply
+        :param number_steps (optional): Number of steps used for ramping.
+        :param signal (optional): pyqtSignal to emit after each step. The signal argument must be of type np.array.
+        :param demagnetization_flag (optional): If flag is True, a demagnetization procedure is applied to the coi prior to ramping.
         """
-        threading.Thread.__init__(self)
-        self._connection = connection
-        self._new_voltage = new_voltage
-        self._new_current = new_current
-        self._num_steps = steps
+        super().__init__(*args, **kwargs)
 
-        self._name = 'VoltageRamper_' + str(self._connection.channel)
+        # initialize variables 
+        self.device = device
+        self.number_steps = number_steps
+        self._signal = signal
+        self._demagnetization_flag = demagnetization_flag
+        self._stop_event = threading.Event()
+
+        # for ensuring either current or voltage compliance, either an overestimated or underestimated voltage is required,
+        # hence two estimates of the coil's resistance are defined here
+        self.R_coils_overestimate = 0.48 # [Ohm]
+        self.R_coils_underestimate = 0.4 # [Ohm]
+
+        # save target current as positive number and pass its original sign to the estimated voltage.
+        # use overestimate of resistance to ensure current compliance here
+        self.target_current = abs(target_current)
+        self.target_voltage = np.sign(target_current) * self.R_coils_overestimate * target_current
+
+        # check target current and voltage values, redefine if they are outside the allowed limits
+        self._check_values()
+
+
+    def _check_values(self):
+        """Check whether target current and voltage are within the allowed limits, if not set to limits.
+        """
+        # check for too large value
+        if self.target_current > self.device.current_lim:
+            self.target_current = self.device.current_lim
+        if abs(self.target_voltage) > self.device.voltage_lim:
+            self.target_voltage = self.device.voltage_lim
+
+        # if target is close to zero current or voltage, set to minimum values accepted by driver
+        if self.target_current < 0.002 or abs(self.target_voltage) < 0.001:
+            self.target_current = 0.002
+            self.target_voltage = 0
+
+
+    def stop(self):
+        """Set the stop event. 
+        """
+        self._stop_event.set()
+
 
     def run(self):
-        try:
-            rampVoltage(
-                self._connection,
-                self._new_voltage,
-                self._new_current,
-                self._num_steps)
-        except BaseException:
-            print(f'There was an error on channel {self._connection.channel}!')
-            traceback.print_exc()
-            exctype, value = sys.exc_info()[:2]
-            print(f'{exctype} {value}\n{traceback.format_exc()}')
+        """Overwrite run method to define the thread's purpose. If a stop event is set while the thread is running, 
+        the current ramping step is finalized and the thread will be terminated before starting the next ramping step. 
+        """
+        # clear output of device in case it has been locked due to some previous error
+        self.device.clrOutputProt()
+
+        # if the output is currently off, set voltage limit to zero before enabling output
+        if self.device.get_output_state() == 'off':
+            self.device.set_voltage(0)
+            self.device.enable_output()
+
+        # measure the current output
+        initial_current = self.device.get_current()
+
+        # if desired run the demagnetization procedure first
+        if self._demagnetization_flag and not np.isclose(0, initial_current):
+            self._demagnetization_procedure()
+        
+        # ensure device works in voltage compliance, take an intermediate step if this isn't the case yet
+        self._ensure_voltage_compliance(initial_current)
+
+        # only proceed if the stop has not been set already
+        if not self._stop_event.is_set():
+
+            # set current limit to target value, note that this should not influence output due to voltage compliance
+            self.device.set_current(self.target_current)
+
+            # if target current or voltage are set to zero (or smallest possible value) disable the output 
+            if self.target_current <= 0.002 or abs(self.target_voltage) < 0.001:
+                self.device.disable_output()
+
+            # else ramp to lift the voltage to target_voltage, which is slightly overestimated 
+            # -> once the target current is reached the device is back to current compliance
+            else:
+                self._linarly_ramp_voltage(self.target_voltage)
 
 
-def rampVoltageSimple(connection: ITPowerSupplyDriver, initial_voltage: float = 0,
-                    target_voltage: float = 0.3, steps: int = 5):
-    """Ramping the voltage linearly from initial to target value.
+    def _ensure_voltage_compliance(self, initial_current : float):
+        """Ensure that power supplies works in voltage compliance afterwards. 
 
-    :param connection: Current source which is to be controlled
-    :type connection: ITPowerSupplyDriver
-    :param initial_voltage: Voltage that is set right now.
-    :param target_voltage: Target voltage.
-    :param steps: Defaults to 5.
-    """
-    connection.set_voltage(initial_voltage)
-    diff_v = target_voltage - initial_voltage
-    step_size = diff_v / steps
+        :param initial_current: measured current when calling this method. The only reason why this argument
+            is added is that the current is measured in the self.run method right before calling this method,
+            so measuring the current again would be an unnecessay repetition. 
+        """
+        # if target current is below initial current (absolute numbers), bring voltage down to slightly below the target voltage first
+        if self.target_current  < abs(initial_current):
+            # ramp voltage below target voltage by taking an intermediate step
+            intermediate_voltage = self.R_coils_underestimate * self.target_current if self.target_current > 0.02 else 0
+            self._linarly_ramp_voltage(intermediate_voltage)
 
-    for _ in range(steps):
-        initial_voltage = initial_voltage + step_size
-        connection.set_voltage(initial_voltage)
-        diff_v = target_voltage - initial_voltage
+        # only proceed if the stop has not been set already
+        if not self._stop_event.is_set():
 
-    connection.set_voltage(target_voltage)
-
-
-def rampVoltage(connection: ITPowerSupplyDriver, target_voltage: float,
-                target_current: float, steps: int):
-    """Ramp voltage to a new specified value. The current should not be directly set due
-    to the load inductance, instead it is a limiter for the voltage increase. Like this, it
-    is possible to ensure that the current takes the exact desired value without causing
-    the voltage protection to trip.
-
-    :param connection:Current source which is to be controlled
-    :param target_voltage: Target voltage
-    :param target_current: Target current
-    :param steps: number of voltage increments.
-    """
-    connection.clrOutputProt()
-
-    if connection.get_output_state() == 'off':
-        connection.set_voltage(0)
-        connection.enable_output()
-
-    if target_current > connection.current_lim:
-        target_current = connection.current_lim
-    if target_current < 0.002 or abs(target_voltage) < 0.001:
-        target_current = 0.002
-        target_voltage = 0
-    if abs(target_voltage) > connection.voltage_lim:
-        target_voltage = connection.voltage_lim
-
-    meas_voltage = connection.get_voltage()
-    meas_current = connection.get_current()
-
-    if target_current - abs(meas_current) < 0:
-        intermediate_step = 0.4 * target_current if target_current > 0.02 else 0
-        rampVoltageSimple(connection, meas_voltage, intermediate_step, steps)
-
-    repeat_count = 0
-    meas_current_queue = [meas_current, 0]
-    while not (abs(meas_current) < target_current or repeat_count >= 5):
-        meas_current_queue.insert(0, connection.get_current())
-        meas_current_queue.pop(2)
-        repeat = abs(meas_current_queue[0] - meas_current_queue[1]) < 0.002
-        if repeat:
-            repeat_count += 1
-        else:
+            # wait until target_current > currently_set_current is indeed satisfied, it may take a moment for the hardware to respond
             repeat_count = 0
+            meas_current_queue = [self.device.get_current(), 0]
+            while  self.target_current <= abs(meas_current_queue[0]) and repeat_count < 5:
+                meas_current_queue.insert(0, self.device.get_current())
+                meas_current_queue.pop(2)
+                if abs(meas_current_queue[0] - meas_current_queue[1]) < 0.002:
+                    repeat_count += 1
+                else:
+                    repeat_count = 0
 
-    connection.set_current(target_current)
 
-    if target_current < 0.002 or abs(target_voltage) < 0.001:
-        connection.disable_output()
-    else:
-        meas_voltage = connection.get_voltage()
-        rampVoltageSimple(connection, meas_voltage, target_voltage, steps)
+    def _linarly_ramp_voltage(self, target_voltage : float):
+        """Ramp the voltage of the power supply to a provided target value.
+        It is recommended to only call this function when device is in voltage compliance.
+
+        :param target_voltage: desired final voltage
+        """
+        # set voltage to the current output voltage (ensures voltage compliance)
+        initial_voltage = self.device.get_voltage()
+        self.device.set_voltage(initial_voltage)
+        
+        # estimate current distance to target and set step size
+        step_size = (target_voltage - initial_voltage) / self.number_steps
+
+        for i in range(self.number_steps):
+            # exit loop if stop event has been set and set current to the currently measured value
+            if self._stop_event.is_set():
+                self.device.set_current(self.device.get_current())
+                break
+
+            self.device.set_voltage(initial_voltage + (i*1)*step_size)
+
+            # send a signal with array of current values as arguments if provided
+            if self._signal is not None:
+                self._signal.emit(self.device.get_current(), self.device._channel)
+
+        
+    def _demagnetization_procedure(self):
+        """Apply a demagnetization procedure, which performs an approximation of a damped oscillation.
+        Eventually, zero current is applied and the remnant magnetization ideally zero, too. 
+        The initial amplitude is the currently applied current. 
+
+        """   
+        # initialize vertices of damped osciallation which are to be approached during the procedure
+        reference_points = np.array([0.2, 1, 2, 3, 4, 5, 6, 7, 8])
+        factors = np.exp(-0.7 * reference_points)
+
+        # set current to max, st. power supply works in voltage compliance
+        self.device.set_current(5.01)
+
+        # measure currently set output current
+        initial_current = self.device.get_current()
+
+        # estimate vertices of oscillation and alternatingly flip sign of amplitude, add zero at the end
+        vertices = initial_current * factors * (-1)**np.arange(1, len(factors)+1)
+        vertices = np.append(vertices, 0)
+
+        for i in range(len(vertices)):
+
+            # exit loop if stop event has been set
+            if self._stop_event.is_set():
+                break
+
+
+            self._linarly_ramp_voltage(vertices[i])
+
+            # this sleep is also in hardware backend to ensure that vertex is actually approached
+            sleep(0.1)
+
+        self.disable_field()
+
 
 
 if __name__ == "__main__":
@@ -295,10 +367,10 @@ if __name__ == "__main__":
     psu = ElectroMagnetBackend()
 
     psu.openConnection()
-    # psu.setCurrents([1, 3, 2.3])
+    # psu.set_currents([1, 3, 2.3])
 
     sleep(10)
 
-    psu.disableCurrents()
+    psu.disable_field()
 
     psu.closeConnection()
