@@ -87,7 +87,7 @@ class DummyMagnetBackend(MagnetBackendBase):
         """Ramp output current from the currently set current values to a new target value. 
 
         :param target_currents: Current values to be set.
-        :param emit_signals_flag (optional): If True the self.on_current_change_single signal is emitted after each step.
+        :param emit_signals_flag (optional): If True the self.on_single_current_change signal is emitted after each step.
             This flag is intented to be used when disabling the magnet, since current updates should be switched off 
             when the magnet is off, but the process of driving the currents to zero should still be monitored.
         """
@@ -105,7 +105,7 @@ class DummyMagnetBackend(MagnetBackendBase):
         
         # if desired, pass the on_current_change attribute to the individual threads
         if emit_signals_flag:
-            signal = self.on_current_change_single
+            signal = self.on_single_current_change
         else:
             signal = None
 

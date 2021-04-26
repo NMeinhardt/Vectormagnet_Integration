@@ -15,8 +15,6 @@ from PyQt5.QtWidgets import (QApplication, QCheckBox, QFormLayout, QFrame,
 
 from core.hardware_backend import ElectroMagnetBackend
 from core.dummy_backend import DummyMagnetBackend
-from core.field_current_tr import (computeCoilCurrents,
-                                   computeMagneticFieldVector)
 from core.backend_base import MAGNET_STATE as MagnetState
 
 
@@ -172,7 +170,7 @@ class VectorMagnetDialog(QWidget):
 
         # Backend initiated events
         self.backend.on_current_change_all.connect(self.on_backend_current_change_all)
-        self.backend.on_current_change_single.connect(self.on_backend_current_change_single)
+        self.backend.on_single_current_change.connect(self.on_backend_current_change_single)
         self.backend.on_field_status_change.connect(self.on_backend_status_change)
 
         # Timer initiated events

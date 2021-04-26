@@ -3,7 +3,7 @@ import numpy as np
 from time import sleep
 from PyQt5.QtCore import pyqtSignal
 
-from core.itech_driver import ITPowerSupplyDriver
+from core.itech_driver import ITPowerSupplyDriver, OutputState
 from core.backend_base import MagnetBackendBase
 from core.backend_base import MAGNET_STATE as MagnetState
 
@@ -15,7 +15,7 @@ class ElectroMagnetBackend(MagnetBackendBase):
     """
     name = 'ElectroMagnet'
 
-    def __init__(self, ramp_num_steps : int = 5):
+    def __init__(self, ramp_num_steps : int = 5, number_channels = 3):
         """Instance constructor.
 
         :param ramp_num_steps: number of steps when ramping currents.
@@ -36,7 +36,7 @@ class ElectroMagnetBackend(MagnetBackendBase):
         self.IPs = ['192.168.237.47', '192.168.237.48', '192.168.237.49']
 
         # connect to power supplies
-        self.power_supplies = np.empty(3, dtype= ITPowerSupplyDriver)
+        self.power_supplies = np.empty(number_channels, dtype= ITPowerSupplyDriver)
         for i in range(3):
             self.power_supplies[i] = ITPowerSupplyDriver(i,   self.IPs[i], 
                                                                 self.port, 
@@ -44,7 +44,7 @@ class ElectroMagnetBackend(MagnetBackendBase):
                                                                 self.maxVoltage)
 
         # thread pool for ramping
-        self.ramping_threads = np.empty(3, dtype = CurrentRampingHardwareThread)
+        self.ramping_threads = np.empty(number_channels, dtype = CurrentRampingHardwareThread)
 
         # open connection to power supplies
         self.open_connection()
@@ -57,22 +57,43 @@ class ElectroMagnetBackend(MagnetBackendBase):
     def ramp_num_steps(self, num_steps: int):
         self._ramp_num_steps = num_steps
 
+    def shutdown(self):
+        """Overwrite method that is executed when changing backend or closing QS3.
+        """
+        print(f"BAK :: magnet ({self.name}) :: shutdown")
+        if self._magnet_state == MagnetState.ON:
+            # enforce that no demagnetization happens when window is suddenly closed
+            self._demagnetization_flag = False
+            self.disable_field()
+
+            # wait until all threads have exited, else threads will run into errors after disconnecting 
+            for thread in self.ramping_threads:
+                thread.join()
+
+        # disconnect from power supplies
+        self.close_connection()
+
 
     def open_connection(self):
         """Open a connection to each IT6432 current source.
         """
+        print(f"BAK :: magnet ({self.name}) :: open_connection")
         for channel in self.power_supplies:
             channel.connect()
             channel.set_operation_mode('remote')
+            if channel.get_output_state() == OutputState.ON:
+                channel.disable_output()
     
     
     def close_connection(self):
         """Close the connection with the current sources.
         """
+        print(f"BAK :: magnet ({self.name}) :: close_connection")
         for channel in self.power_supplies:
+            if channel.get_output_state() == OutputState.ON:
+                channel.disable_output()
             channel.set_operation_mode('local')
-            channel.close()
-
+            channel.close() 
             
     def get_currents(self) -> np.ndarray:
         """Returns measured currents of power supplies.
@@ -94,7 +115,6 @@ class ElectroMagnetBackend(MagnetBackendBase):
         self._setpoint_currents = values
 
         if self._magnet_state == MagnetState.ON:
-            self.on_current_change_all.emit(self.get_currents())
             self._ramp_to_new_current_values(self._setpoint_currents)
             
 
@@ -112,7 +132,7 @@ class ElectroMagnetBackend(MagnetBackendBase):
         """Disables magnetic field.
         """
         # ramp currents down to zero, note that demagnetization is handled implicitly
-        self._ramp_to_new_current_values(np.zeros(3, dtype=float))
+        self._ramp_to_new_current_values(np.zeros(3, dtype=float), emit_signals_flag=True)
 
         # disable outputs of current supplies
         [self.power_supplies[i].disable_output() for i in range(3)]
@@ -137,7 +157,7 @@ class ElectroMagnetBackend(MagnetBackendBase):
         """Ramp output current from the currently set current values to a new target value. 
 
         :param target_currents: Current values to be set.
-        :param emit_signals_flag (optional): If True the self.on_current_change_single signal is emitted after each step.
+        :param emit_signals_flag (optional): If True the self.on_single_current_change signal is emitted after each step.
             This flag is intented to be used when disabling the magnet, since current updates should be switched off 
             when the magnet is off, but the process of driving the currents to zero should still be monitored.
         """
@@ -153,9 +173,9 @@ class ElectroMagnetBackend(MagnetBackendBase):
         except AttributeError:
             pass
         
-        # if desired, pass the on_current_change_single attribute to the individual threads
+        # if desired, pass the on_single_current_change attribute to the individual threads
         if emit_signals_flag:
-            signal = self.on_current_change_single
+            signal = self.on_single_current_change
         else:
             signal = None
 
@@ -166,10 +186,8 @@ class ElectroMagnetBackend(MagnetBackendBase):
                                             demagnetization_flag = self._demagnetization_flag)
 
         # start the threads
-        no_running_threads_ini = threading.active_count()
         for thread in self.ramping_threads:
             thread.start()
-        print(f'running threads before: {no_running_threads_ini} now: {threading.active_count()}')
 
 
 
@@ -201,13 +219,14 @@ class CurrentRampingHardwareThread(threading.Thread):
 
         # for ensuring either current or voltage compliance, either an overestimated or underestimated voltage is required,
         # hence two estimates of the coil's resistance are defined here
-        self.R_coils_overestimate = 0.48 # [Ohm]
+        self.R_coils_overestimate = 0.62 # [Ohm]
         self.R_coils_underestimate = 0.4 # [Ohm]
 
         # save target current as positive number and pass its original sign to the estimated voltage.
         # use overestimate of resistance to ensure current compliance here
         self.target_current = abs(target_current)
         self.target_voltage = np.sign(target_current) * self.R_coils_overestimate * target_current
+        # print(f'(ch {self.device._channel}): target is {self.target_current} A, {self.target_voltage} V')
 
         # check target current and voltage values, redefine if they are outside the allowed limits
         self._check_values()
@@ -219,8 +238,10 @@ class CurrentRampingHardwareThread(threading.Thread):
         # check for too large value
         if self.target_current > self.device.current_lim:
             self.target_current = self.device.current_lim
+            print('target current exdeeds limit')
         if abs(self.target_voltage) > self.device.voltage_lim:
             self.target_voltage = self.device.voltage_lim
+            print('target voltage exdeeds limit')
 
         # if target is close to zero current or voltage, set to minimum values accepted by driver
         if self.target_current < 0.002 or abs(self.target_voltage) < 0.001:
@@ -242,7 +263,7 @@ class CurrentRampingHardwareThread(threading.Thread):
         self.device.clrOutputProt()
 
         # if the output is currently off, set voltage limit to zero before enabling output
-        if self.device.get_output_state() == 'off':
+        if self.device.get_output_state() == OutputState.OFF:
             self.device.set_voltage(0)
             self.device.enable_output()
 
@@ -250,7 +271,7 @@ class CurrentRampingHardwareThread(threading.Thread):
         initial_current = self.device.get_current()
 
         # if desired run the demagnetization procedure first
-        if self._demagnetization_flag and not np.isclose(0, initial_current):
+        if self._demagnetization_flag and not np.isclose(0, initial_current, atol=0.01):
             self._demagnetization_procedure()
         
         # ensure device works in voltage compliance, take an intermediate step if this isn't the case yet
@@ -318,8 +339,9 @@ class CurrentRampingHardwareThread(threading.Thread):
             if self._stop_event.is_set():
                 self.device.set_current(self.device.get_current())
                 break
-
-            self.device.set_voltage(initial_voltage + (i*1)*step_size)
+            
+            # raise voltage by one step
+            self.device.set_voltage(initial_voltage + (i+1)*step_size)
 
             # send a signal with array of current values as arguments if provided
             if self._signal is not None:
@@ -352,13 +374,11 @@ class CurrentRampingHardwareThread(threading.Thread):
             if self._stop_event.is_set():
                 break
 
-
+            # ramp to next vertex
             self._linarly_ramp_voltage(vertices[i])
 
-            # this sleep is also in hardware backend to ensure that vertex is actually approached
+            # ensure that vertex is actually approached
             sleep(0.1)
-
-        self.disable_field()
 
 
 
