@@ -1,4 +1,3 @@
-
 import socket
 from time import sleep, time
 from threading import RLock
@@ -26,25 +25,30 @@ class ITPowerSupplyDriver(object):
         :param channel: channel number, use 1, 2 or 3
         :param IP_address: IP address of power supply
         :param port: port for communication with power supply
-        :param maxCurrent: maximum allowed current
-        :param maxVoltage: maximum allowed voltage
+        :param maxCurrent: maximum allowed current as a soft limit
+        :param maxVoltage: maximum allowed voltage as a soft limit
   
         """
         self._channel = channel
         self._connected = False
 
+        # connection settings
         self._sock = socket.socket()
         self._host = IP_address
         self._port = port
         self._timeout = 10.0
-
         self._read_termination = '\n'
         self._chunk_size = 1024
 
-        self.MAX_CURR = maxCurrent
-        self.MAX_VOLT = maxVoltage
-        self.current_lim = 0
-        self.voltage_lim = 0
+        # hardware limits for current and voltage, get updated once connecting to hardware
+        self.MAX_CURR = 0
+        self.MAX_VOLT = 0
+
+        # soft limits for current and voltage
+        self.current_lim = maxCurrent
+        self.voltage_lim = maxVoltage
+
+        # locks to prevent multiple threads from sending/receiving data simultaneously via socket
         self.lock_sending = RLock()
         self.lock_receiving = RLock()
             
@@ -69,26 +73,27 @@ class ITPowerSupplyDriver(object):
         """Connect to the device
 
         """
+        logger.debug(f'DRV :: IT6432 :: connect :: CH {self._channel}')
         print(f'DRV :: IT6432 :: connect :: CH {self._channel}')
         try:
             self._sock.connect((self._host, self._port))
 
-        except Exception as err:\
-            print(err)
+        except Exception as err:
+            logger.error(err)
 
         else:
             self._connected = True
             self._sock.settimeout(self._timeout)
 
             limits = self.getMaxMinOutput()
-            self.current_lim = limits[0]
-            self.voltage_lim = limits[2]
+            self.MAX_CURR = limits[0]
+            self.MAX_VOLT = limits[2]
 
 
     def close(self):
         """Closes the socket connection
         """
-        print(f'DRV :: IT6432 :: close :: CH {self._channel}')
+        logger.debug(f'DRV :: IT6432 :: close :: CH {self._channel}')
         self._sock.close()
 
 
@@ -111,6 +116,7 @@ class ITPowerSupplyDriver(object):
                 self._sock.sendall(cmd.encode('ascii'))
         except (ConnectionResetError, ConnectionError, ConnectionRefusedError, ConnectionAbortedError) as err:
             print(f'error on (ch {self._channel}) in _send: cmd= {cmd[:-1]}')
+            logger.error(err)
 
         if check_error:
             self.checkError()
@@ -150,14 +156,14 @@ class ITPowerSupplyDriver(object):
                     pass
 
         except socket.timeout:
-            print(f'{__name__} Timeout occurred on CH {self._channel}')
+            logger.debug(f'{__name__} Timeout occurred on CH {self._channel}')
             return ''
 
         try:
             res = chunk.decode('ascii').strip('\n')
         except UnicodeDecodeError:
             res = chunk.decode('uft8').strip('\n')
-            print(f'{__name__} Non-ascii string received on CH {self._channel}: {res}')
+            logger.error(f'{__name__} Non-ascii string received on CH {self._channel}: {res}')
 
         # print(f'(ch {self._channel}): << {res}')
 
@@ -195,13 +201,14 @@ class ITPowerSupplyDriver(object):
     def clrOutputProt(self):
         """Clear output protection of current supply.
         """
+        logger.debug(f'DRV :: IT6432 :: clrOutputProt on CH {self._channel}')
         self._send('output:protection:clear')
 
 
     def clrErrorQueue(self):
         """Clear all errors from the instrument error queue
         """
-        print(f'DRV :: IT6432 :: clrErrorQueue on CH {self._channel}')
+        logger.debug(f'DRV :: IT6432 :: clrErrorQueue on CH {self._channel}')
         self._send('system:clear', check_error=False)
 
 
@@ -222,7 +229,11 @@ class ITPowerSupplyDriver(object):
 
         :param value: new target current [A] of current supply
         :type value: float
+        :raises ExceedsLimits: When provided value exceeds software defined limit.
         """
+        if value > self.current_lim:
+            raise ExceedsLimits
+
         self._send(f'current {value:.3f}A')
 
 
@@ -231,7 +242,11 @@ class ITPowerSupplyDriver(object):
 
         :param value: new target voltage [V] of current supply
         :type value: float
+        :raises ExceedsLimits: When provided value exceeds software defined limit.
         """
+        if value > self.voltage_lim:
+            raise ExceedsLimits
+
         self._send(f'voltage {value:.3f}V')
 
 
@@ -319,23 +334,27 @@ class ITPowerSupplyDriver(object):
         :returns: maximum, minimum current, maximum, minimum voltage
         :rtype: float
         """
-        max_curr = self._send_and_recv('current:maxset?', check_error=False)
-        min_curr = self._send_and_recv('current:minset?', check_error=False)
-        max_volt = self._send_and_recv('voltage:maxset?', check_error=False)
-        min_volt = self._send_and_recv('voltage:minset?', check_error=False)
+        MAX_CURR = self._send_and_recv('current:maxset?', check_error=False)
+        MIN_CURR = self._send_and_recv('current:minset?', check_error=False)
+        MAX_VOLT = self._send_and_recv('voltage:maxset?', check_error=False)
+        MIN_VOLT = self._send_and_recv('voltage:minset?', check_error=False)
 
-        return float(max_curr), float(min_curr), float(max_volt), float(min_volt)
+        return float(MAX_CURR), float(MIN_CURR), float(MAX_VOLT), float(MIN_VOLT)
 
 
     def set_maximum_current(self, current_lim: float = 5):
-        """Set maximum current values for each ECB channel, as long as they are under the threshold specified in the API source code.
+        """Set soft maximum limit on current values, as long as it respects the hard limit set by the hardware.
 
         :param current_lim: desired maximum current. Defaults to 5.
         :type current_lim: float, optional
+        :raises ValueError: negative numbers are not permitted.
         """
+        if current_lim < 0:
+            raise ValueError
+
         if current_lim > self.MAX_CURR:
             self.current_lim = self.MAX_CURR
-            print(f'DRV :: IT6432 :: set_maximum_current :: Current limit cannot be higher than {self.MAX_CURR} A')
+            logger.debug(f'DRV :: IT6432 :: set_maximum_current :: Current limit cannot be higher than {self.MAX_CURR} A')
         else:
             self.current_lim = current_lim
 
@@ -343,15 +362,19 @@ class ITPowerSupplyDriver(object):
         self._send(f'current:limit {self.current_lim}')
 
 
-    def set_maximum_voltage(self, voltage_lim: float = 10):
-        """Set maximum voltage values for each ECB channel, as long as they are under the threshold specified in the API source code.
+    def set_maximum_voltage(self, voltage_lim: float):
+        """Set soft maximum limit on voltage values, as long as it respects the hard limit set by the hardware.
 
-        :param voltage_lim: desired maximum voltage. Defaults to 10.
-        :type voltage_lim: float, optional
+        :param voltage_lim: desired maximum voltage, must be a nonzero number
+        :type voltage_lim: float
+        :raises ValueError: negative numbers are not permitted.
         """
+        if voltage_lim < 0:
+            raise ValueError
+
         if voltage_lim > self.MAX_VOLT:
             self.voltage_lim = self.MAX_VOLT
-            print(f'DRV :: IT6432 :: set_maximum_voltage :: Voltage limit cannot be higher than {self.MAX_VOLT} V')
+            logger.debug(f'DRV :: IT6432 :: set_maximum_voltage :: Voltage limit cannot be higher than {self.MAX_VOLT} V')
         else:
             self.voltage_lim = voltage_lim
 
@@ -391,10 +414,9 @@ class ITPowerSupplyDriver(object):
             try:
                 error_code = int(response)
             except ValueError:
-                print(f'DRV :: IT6432 :: checkError :: channel = {self._channel}, response = {response}')
+                logger.error(f'DRV :: IT6432 :: checkError :: channel = {self._channel}, response = {response}')
             except Exception as e:
-                print(f'DRV :: IT6432 :: checkError :: channel = {self._channel}, response = {response}')
-                print(f'{type(e)}: {e}')
+                logger.error(f'DRV :: IT6432 :: checkError :: channel = {self._channel}, response = {response} - {type(e)}: {e}')
             else:
                 if int(error_code) != 0 and int(error_code) != 224:
                     raise self._ErrorFactory(int(error_code), f'(ch {self._channel}): no message provided')
@@ -437,6 +459,12 @@ class ITPowerSupplyDriver(object):
         else:
             return GenericError(code, msg)
 
+class ExceedsLimits(Exception):
+    """Raised when a value that is larger than a given limit should be set.
+    """
+    pass
+        
+
 class ErrorBase(Exception):
     def __init__(self, code, *args, **kwargs):
         self.code = code
@@ -453,7 +481,8 @@ class GenericError(ErrorBase):
 
     def __init__(self, code, msg, *args, **kwargs):
         ErrorBase.__init__(self, code, *args, msg=msg, **kwargs)
-        print(f'{code}: {msg}')
+        logger.error(f'{code}: {msg}')
+        print(f'\n{code}: {msg}')
 
 
 class ParameterOverflow(ErrorBase):

@@ -4,8 +4,9 @@ from time import sleep
 from PyQt5.QtCore import pyqtSignal
 
 from core.itech_driver import ITPowerSupplyDriver, OutputState
-from core.backend_base import MagnetBackendBase
+from core.backend_base import MagnetBackendBase, ObserverThread
 from core.backend_base import MAGNET_STATE as MagnetState
+from core.backend_base import CURRENT_TASK as CurrentTask
 
 
 class ElectroMagnetBackend(MagnetBackendBase):
@@ -14,6 +15,9 @@ class ElectroMagnetBackend(MagnetBackendBase):
 
     """
     name = 'ElectroMagnet'
+
+    # Event: A previous task has finished. 
+    on_task_finished = pyqtSignal(CurrentTask)
 
     def __init__(self, ramp_num_steps : int = 5, number_channels = 3):
         """Instance constructor.
@@ -35,7 +39,7 @@ class ElectroMagnetBackend(MagnetBackendBase):
         self.maxCurrent = 5.05
         self.maxVoltage = 30
         self.port = 30000
-        self.IPs = ['192.168.237.47', '192.168.237.48', '192.168.237.49']
+        self.IPs = ['169.254.237.47', '169.254.237.48', '169.254.237.49']
 
         # connect to power supplies
         self.power_supplies = np.empty(self._number_channels, dtype= ITPowerSupplyDriver)
@@ -50,6 +54,9 @@ class ElectroMagnetBackend(MagnetBackendBase):
 
         # open connection to power supplies
         self.open_connection()
+
+        # catch signal emitted when a task is finished
+        self.on_task_finished.connect(self.on_task_finished_action)
 
     @property
     def ramp_num_steps(self) -> int:
@@ -95,7 +102,8 @@ class ElectroMagnetBackend(MagnetBackendBase):
                 channel.disable_output()
             channel.set_operation_mode('local')
             channel.close() 
-            
+
+
     def get_currents(self) -> np.ndarray:
         """Returns measured currents of power supplies.
 
@@ -116,14 +124,15 @@ class ElectroMagnetBackend(MagnetBackendBase):
         self._setpoint_currents = values
 
         if self._magnet_state == MagnetState.ON:
-            self._ramp_to_new_current_values(self._setpoint_currents)
+            self.on_task_change.emit(CurrentTask.SWITCHING)
+            self._ramp_to_new_current_values(self._setpoint_currents, CurrentTask.SWITCHING)
             
 
     def enable_field(self):
         """Enables magnetic field.
         """
         # ramp to setpoint currents, note that demagnetization and enabling of outputs are handled implicitly
-        self._ramp_to_new_current_values(self._setpoint_currents)
+        self._ramp_to_new_current_values(self._setpoint_currents, CurrentTask.ENABLING)
         
         self._magnet_state = MagnetState.ON
         self.on_field_status_change.emit(MagnetState.ON)
@@ -132,14 +141,12 @@ class ElectroMagnetBackend(MagnetBackendBase):
     def disable_field(self):
         """Disables magnetic field.
         """
-        # ramp currents down to zero, note that demagnetization is handled implicitly
-        self._ramp_to_new_current_values(np.zeros(3, dtype=float), emit_signals_flag=True)
-
-        # disable outputs of current supplies
-        [self.power_supplies[i].disable_output() for i in range(self._number_channels)]
+         # ramp currents down to zero, note that demagnetization is handled implicitly 
+        # and outputs of current supplies are disabled at the end.  
+        self._ramp_to_new_current_values(np.array([0, 0, 0], dtype=float), CurrentTask.DISABLING, emit_signals_flag = True)
 
         self._magnet_state = MagnetState.OFF
-        self.on_field_status_change.emit(MagnetState.OFF)
+        # self.on_field_status_change.emit(MagnetState.OFF)
 
 
     def get_magnet_status(self) -> MagnetState:
@@ -153,11 +160,35 @@ class ElectroMagnetBackend(MagnetBackendBase):
         """
         self._demagnetization_flag = flag
 
+    
+    def get_demagnetization_flag(self) -> bool:
+        """Returns the demagnetization flag.
 
-    def _ramp_to_new_current_values(self, target_currents: np.ndarray, emit_signals_flag = False):
+        """
+        return self._demagnetization_flag
+
+
+    def on_task_finished_action(self, finished_task : CurrentTask):
+        """React on a finished task by emitting on_task_change signal. 
+        If the finished task was to disable the magnet, additionally emit on_field_status_change signal.
+        """
+
+        if finished_task == CurrentTask.DEMAGNETIZING:
+            # demagnetization is done, notify UI that a new field might be set now.
+            self.on_task_change.emit(CurrentTask.ENABLING)
+        elif finished_task == CurrentTask.DISABLING:
+            # disabling of the field is done, emit signal of status change, too
+            self.on_field_status_change.emit(MagnetState.OFF)
+            self.on_task_change.emit(CurrentTask.IDLE)
+        else:
+            # either CurrentTask.ENABLING or CurrentTask.SWITCHING is done, notify UI that nothing more happens
+            self.on_task_change.emit(CurrentTask.IDLE)
+
+    def _ramp_to_new_current_values(self, target_currents: np.ndarray, running_task : CurrentTask, emit_signals_flag = True):
         """Ramp output current from the currently set current values to a new target value. 
 
         :param target_currents: Current values to be set.
+        :param running_task: Indicator for the purpose of ramping the currents, e.g. for enabling or disabling the field.
         :param emit_signals_flag (optional): If True the self.on_single_current_change signal is emitted after each step.
             This flag is intented to be used when disabling the magnet, since current updates should be switched off 
             when the magnet is off, but the process of driving the currents to zero should still be monitored.
@@ -174,6 +205,12 @@ class ElectroMagnetBackend(MagnetBackendBase):
         except AttributeError:
             pass
         
+        # emit signal to herald a new task
+        if self._demagnetization_flag:
+            self.frontend.on_task_change.emit(CurrentTask.DEMAGNETIZING)
+        else:
+            self.frontend.on_task_change.emit(running_task)
+
         # if desired, pass the on_single_current_change attribute to the individual threads
         if emit_signals_flag:
             signal = self.on_single_current_change
@@ -181,14 +218,19 @@ class ElectroMagnetBackend(MagnetBackendBase):
             signal = None
 
         # initialize threads that ramp current from initial to final value
-        for i in range(self._number_channels):
+        for i in range(3):
             self.ramping_threads[i] = CurrentRampingHardwareThread(self.power_supplies[i], target_currents[i], 
-                                            number_steps = self.ramp_num_steps, signal=signal,
+                                            number_steps = self.ramp_num_steps, signal = signal,
                                             demagnetization_flag = self._demagnetization_flag)
 
         # start the threads
         for thread in self.ramping_threads:
             thread.start()
+
+        # start the observer of the three threads
+        self.observer = ObserverThread(self.ramping_threads, running_task, self.on_task_finished, 
+                    check_demagnetization = self._demagnetization_flag)
+        self.observer.start()
 
 
 
@@ -216,6 +258,7 @@ class CurrentRampingHardwareThread(threading.Thread):
         self.number_steps = number_steps
         self._signal = signal
         self._demagnetization_flag = demagnetization_flag
+        self._demagnetization_passed = False
         self._stop_event = threading.Event()
 
         # for ensuring either current or voltage compliance, either an overestimated or underestimated voltage is required,
@@ -227,7 +270,6 @@ class CurrentRampingHardwareThread(threading.Thread):
         # use overestimate of resistance to ensure current compliance here
         self.target_current = abs(target_current)
         self.target_voltage = np.sign(target_current) * self.R_coils_overestimate * self.target_current
-        # print(f'(ch {self.device._channel}): target is {self.target_current} A, {self.target_voltage} V')
 
         # check target current and voltage values, redefine if they are outside the allowed limits
         self._check_values()
@@ -304,7 +346,7 @@ class CurrentRampingHardwareThread(threading.Thread):
         # if target current is below initial current (absolute numbers), bring voltage down to slightly below the target voltage first
         if self.target_current  < abs(initial_current):
             # ramp voltage below target voltage by taking an intermediate step
-            intermediate_voltage = np.sign(self.target_voltage) *self.R_coils_underestimate * self.target_current if self.target_current > 0.02 else 0
+            intermediate_voltage = np.sign(self.target_voltage) * self.R_coils_underestimate * self.target_current if self.target_current > 0.02 else 0
             self._linarly_ramp_voltage(intermediate_voltage)
 
         # only proceed if the stop has not been set already
@@ -348,6 +390,12 @@ class CurrentRampingHardwareThread(threading.Thread):
             if self._signal is not None:
                 self._signal.emit(self.device.get_current(), self.device._channel)
 
+
+    def demagnetization_completed(self) -> bool:
+        """Return whether demagnetization has been completed. 
+        """
+        return self._demagnetization_passed
+
         
     def _demagnetization_procedure(self):
         """Apply a demagnetization procedure, which performs an approximation of a damped oscillation.
@@ -380,6 +428,8 @@ class CurrentRampingHardwareThread(threading.Thread):
 
             # ensure that vertex is actually approached
             sleep(0.1)
+
+        self._demagnetization_passed = True
 
 
 
