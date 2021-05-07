@@ -45,7 +45,6 @@ class DummyMagnetBackend(MagnetBackendBase):
         self._setpoint_currents = values
 
         if self._magnet_state == MagnetState.ON:
-            self.on_current_change_all.emit(self.get_currents())
             self._ramp_to_new_current_values(self._setpoint_currents)
 
         

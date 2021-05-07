@@ -195,7 +195,6 @@ class ITPowerSupplyDriver(object):
     def clrOutputProt(self):
         """Clear output protection of current supply.
         """
-        print(f'DRV :: IT6432 :: clrOutputProt on CH {self._channel}')
         self._send('output:protection:clear')
 
 
@@ -305,7 +304,7 @@ class ITPowerSupplyDriver(object):
         self._send("output 0")
 
     
-    def get_output_state(self) -> OUTPUT_STATE:
+    def get_output_state(self) -> OutputState:
         """Return output state of power supply, which can be 'on' or 'off.
         """
         if self._send_and_recv("output?") == "1":
@@ -384,6 +383,8 @@ class ITPowerSupplyDriver(object):
 
         """
         response = self._send_and_recv('system:error?', check_error=False).split(',')
+        if response == ['']:
+            return
         try:
             error_code, error_message = response
         except ValueError:
@@ -391,6 +392,9 @@ class ITPowerSupplyDriver(object):
                 error_code = int(response)
             except ValueError:
                 print(f'DRV :: IT6432 :: checkError :: channel = {self._channel}, response = {response}')
+            except Exception as e:
+                print(f'DRV :: IT6432 :: checkError :: channel = {self._channel}, response = {response}')
+                print(f'{type(e)}: {e}')
             else:
                 if int(error_code) != 0 and int(error_code) != 224:
                     raise self._ErrorFactory(int(error_code), f'(ch {self._channel}): no message provided')

@@ -25,8 +25,8 @@ class MagnetBackendBase(QObject):
     on_field_status_change = pyqtSignal(MAGNET_STATE)
 
     # changeable parameters
-    filename_model_B2I = 'model_QSM_poly3_nooffset_B2I.sav'
-    filename_model_I2B = 'model_QSM_poly3_nooffset_I2B.sav'
+    filename_model_B2I = 'model_poly3_final_B2I.sav'
+    filename_model_I2B = 'model_poly3_final_I2B.sav'
 
     def get_currents(self) -> np.ndarray:
         """Returns currents of power supplies.

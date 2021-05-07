@@ -169,8 +169,7 @@ class VectorMagnetDialog(QWidget):
         self.demagnetizeCheckBox.stateChanged.connect(self.on_demagnetization_check_button_change)
 
         # Backend initiated events
-        self.backend.on_current_change_all.connect(self.on_backend_current_change_all)
-        self.backend.on_single_current_change.connect(self.on_backend_current_change_single)
+        self.backend.on_single_current_change.connect(self.on_backend_single_current_change)
         self.backend.on_field_status_change.connect(self.on_backend_status_change)
 
         # Timer initiated events
@@ -241,17 +240,9 @@ class VectorMagnetDialog(QWidget):
 
         """
         self.backend.set_demagnetization_flag(self.demagnetizeCheckBox.isChecked())
-
-
-    def on_backend_current_change_all(self, currents: np.ndarray):
-        """Update labels with new current values.
-
-        """
-        self.labelMessages.setText('read current values')
-        self._update_current_labels(currents)
     
 
-    def on_backend_current_change_single(self, current: float, channel: int):
+    def on_backend_single_current_change(self, current: float, channel: int):
         """Update a single label with new current values.
 
         """
@@ -322,7 +313,6 @@ class VectorMagnetDialog(QWidget):
 
         # also update currents
         currents = self.backend.get_currents()
-        self.on_backend_current_change_all(currents)
 
 
     def updateErrorMessage(self, args):

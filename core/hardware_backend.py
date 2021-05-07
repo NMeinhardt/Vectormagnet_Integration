@@ -19,6 +19,7 @@ class ElectroMagnetBackend(MagnetBackendBase):
         """Instance constructor.
 
         :param ramp_num_steps: number of steps when ramping currents.
+        :param number_channels: number of power supplies.
         """
         super().__init__()
 
@@ -27,6 +28,7 @@ class ElectroMagnetBackend(MagnetBackendBase):
         self._setpoint_fields = np.array([0, 0, 0], dtype=float)
         self._magnet_state = MagnetState.OFF
         self._demagnetization_flag = False
+        self._number_channels = number_channels
 
         # changeable parameters
         self._ramp_num_steps = ramp_num_steps
@@ -36,15 +38,15 @@ class ElectroMagnetBackend(MagnetBackendBase):
         self.IPs = ['192.168.237.47', '192.168.237.48', '192.168.237.49']
 
         # connect to power supplies
-        self.power_supplies = np.empty(number_channels, dtype= ITPowerSupplyDriver)
-        for i in range(3):
+        self.power_supplies = np.empty(self._number_channels, dtype= ITPowerSupplyDriver)
+        for i in range(self._number_channels):
             self.power_supplies[i] = ITPowerSupplyDriver(i,   self.IPs[i], 
                                                                 self.port, 
                                                                 self.maxCurrent, 
                                                                 self.maxVoltage)
 
         # thread pool for ramping
-        self.ramping_threads = np.empty(number_channels, dtype = CurrentRampingHardwareThread)
+        self.ramping_threads = np.empty(self._number_channels, dtype = CurrentRampingHardwareThread)
 
         # open connection to power supplies
         self.open_connection()
@@ -57,10 +59,9 @@ class ElectroMagnetBackend(MagnetBackendBase):
     def ramp_num_steps(self, num_steps: int):
         self._ramp_num_steps = num_steps
 
-    def shutdown(self):
-        """Overwrite method that is executed when changing backend or closing QS3.
+    def __del__(self):
         """
-        print(f"BAK :: magnet ({self.name}) :: shutdown")
+        """
         if self._magnet_state == MagnetState.ON:
             # enforce that no demagnetization happens when window is suddenly closed
             self._demagnetization_flag = False
@@ -100,7 +101,7 @@ class ElectroMagnetBackend(MagnetBackendBase):
 
         """
         if self._magnet_state == MagnetState.ON:
-            currents = np.array([self.power_supplies[i].get_current() for i in range(3)])
+            currents = np.array([self.power_supplies[i].get_current() for i in range(self._number_channels)])
         else:
             currents = np.zeros(3)
         
@@ -135,7 +136,7 @@ class ElectroMagnetBackend(MagnetBackendBase):
         self._ramp_to_new_current_values(np.zeros(3, dtype=float), emit_signals_flag=True)
 
         # disable outputs of current supplies
-        [self.power_supplies[i].disable_output() for i in range(3)]
+        [self.power_supplies[i].disable_output() for i in range(self._number_channels)]
 
         self._magnet_state = MagnetState.OFF
         self.on_field_status_change.emit(MagnetState.OFF)
@@ -180,7 +181,7 @@ class ElectroMagnetBackend(MagnetBackendBase):
             signal = None
 
         # initialize threads that ramp current from initial to final value
-        for i in range(3):
+        for i in range(self._number_channels):
             self.ramping_threads[i] = CurrentRampingHardwareThread(self.power_supplies[i], target_currents[i], 
                                             number_steps = self.ramp_num_steps, signal=signal,
                                             demagnetization_flag = self._demagnetization_flag)
@@ -220,12 +221,12 @@ class CurrentRampingHardwareThread(threading.Thread):
         # for ensuring either current or voltage compliance, either an overestimated or underestimated voltage is required,
         # hence two estimates of the coil's resistance are defined here
         self.R_coils_overestimate = 0.62 # [Ohm]
-        self.R_coils_underestimate = 0.4 # [Ohm]
+        self.R_coils_underestimate = 0.5 # [Ohm]
 
         # save target current as positive number and pass its original sign to the estimated voltage.
         # use overestimate of resistance to ensure current compliance here
         self.target_current = abs(target_current)
-        self.target_voltage = np.sign(target_current) * self.R_coils_overestimate * target_current
+        self.target_voltage = np.sign(target_current) * self.R_coils_overestimate * self.target_current
         # print(f'(ch {self.device._channel}): target is {self.target_current} A, {self.target_voltage} V')
 
         # check target current and voltage values, redefine if they are outside the allowed limits
@@ -303,7 +304,7 @@ class CurrentRampingHardwareThread(threading.Thread):
         # if target current is below initial current (absolute numbers), bring voltage down to slightly below the target voltage first
         if self.target_current  < abs(initial_current):
             # ramp voltage below target voltage by taking an intermediate step
-            intermediate_voltage = self.R_coils_underestimate * self.target_current if self.target_current > 0.02 else 0
+            intermediate_voltage = np.sign(self.target_voltage) *self.R_coils_underestimate * self.target_current if self.target_current > 0.02 else 0
             self._linarly_ramp_voltage(intermediate_voltage)
 
         # only proceed if the stop has not been set already
