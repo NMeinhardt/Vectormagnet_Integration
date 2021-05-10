@@ -6,10 +6,12 @@ import traceback
 from datetime import datetime
 from time import sleep, time
 import numpy as np
+import json
+
 from PyQt5 import QtGui
 from PyQt5.QtCore import (QObject, QRunnable, Qt, QThreadPool, pyqtSignal,
                           pyqtSlot, QTimer)
-from PyQt5.QtWidgets import (QApplication, QCheckBox, QFormLayout, QFrame,
+from PyQt5.QtWidgets import (QApplication, QCheckBox, QFormLayout, QFrame, QComboBox,
                              QGridLayout, QHBoxLayout, QLabel, QLineEdit,
                              QMainWindow, QPushButton, QVBoxLayout, QWidget)
 
@@ -27,9 +29,16 @@ class SynchroniserSignals(QObject):
     thereby enabling synchronisation among various instances of VectorMagnetDialogs. 
 
     """
+    # signals related to input fields of VectorMagnetDialog
     on_input_fields_edited = pyqtSignal(np.ndarray)
     on_correct_inputs = pyqtSignal()
     on_invalid_inputs = pyqtSignal(np.ndarray, str)
+
+    # signals related to stored vectors of VectorMagnetDialog
+    on_add_stored_vector = pyqtSignal(str)
+    on_remove_stored_vector = pyqtSignal(int)
+    on_edit_text_changed_comboBox = pyqtSignal(str)
+    on_index_changed_comboBox = pyqtSignal(int)
 
     def emit_on_correct_inputs(self):
         self.on_correct_inputs.emit()
@@ -39,6 +48,18 @@ class SynchroniserSignals(QObject):
 
     def emit_on_input_fields_edited(self, values : np.ndarray):
         self.on_input_fields_edited.emit(values)
+    
+    def emit_on_add_stored_vector(self, label):
+        self.on_add_stored_vector.emit(label)
+
+    def emit_on_remove_stored_vector(self, index):
+        self.on_remove_stored_vector.emit(index)
+
+    def emit_on_edit_text_changed_comboBox(self, label):
+        self.on_edit_text_changed_comboBox.emit(label)
+
+    def emit_on_index_changed_comboBox(self, label):
+        self.on_index_changed_comboBox.emit(label)
 
 
 class VectorMagnetDialog(QWidget):
@@ -48,6 +69,9 @@ class VectorMagnetDialog(QWidget):
     # store and update inputs of QLineEdit fields as class variables for synchronization of multiple instances 
     max_length_input_fields = 10
     typed_inputs = np.array(['', '', ''], dtype = np.dtype(f'U{max_length_input_fields}'))
+
+    # use class attribute to collect stored vectors of all instances in one place
+    stored_vectors = {}
 
     def __init__(self, backend, parent = None, synchroniser : SynchroniserSignals = SynchroniserSignals(), *args):
         """Instance constructor.
@@ -69,10 +93,11 @@ class VectorMagnetDialog(QWidget):
         self.currentUpdateTimer = QTimer()
         self.currentUpdateIntervals = 1000
 
-        # set up widgets, layouts and events
-        self._init_widgets()
-        self._init_layout()
-        self._init_events()
+        # define path of json-file used to store user-defined vectors and load latter directly
+        self.file_path_stored_vectors = os.path.join(os.path.dirname(os.path.abspath(__file__)), 
+                                                        'storedVectors/storedVectors.json')
+        for labels, vectors in self.load_stored_vectors(self.file_path_stored_vectors).items():
+            self.stored_vectors[labels] = vectors
 
         # path of images
         self.image_path_coord_system = './gui_images/VM_Coordinate_system.png'
@@ -80,6 +105,11 @@ class VectorMagnetDialog(QWidget):
 
         self.setWindowTitle('Vector Magnet Control')
         self.setWindowIcon(QtGui.QIcon(self.icon_path))
+
+        # set up widgets, layouts and events
+        self._init_widgets()
+        self._init_layout()
+        self._init_events()
 
 
     def __enter__(self):
@@ -89,15 +119,13 @@ class VectorMagnetDialog(QWidget):
     def __exit__(self, exc_type, exc_value, traceback):
         """ Ensure that connection to channels is closed. """
         self.backend.disable_field()
-
-        # switch off QTimer for updating currents
-        # self.currentUpdateTimer.stop()
-
         print('connection closed.')
 
 
     def _init_widgets(self):
-        """ Set container's widget set. """
+        """ Set container's widget set. 
+        
+        """
         # Bare labels
         self.polarCoordsLabels = [QLabel('|\U0001D435| [mT]:'),
                                     QLabel('\U0001D717 [°]:'),
@@ -137,7 +165,6 @@ class VectorMagnetDialog(QWidget):
 
         # Buttons
         self.coordinateSystemButton = QPushButton('show reference coordinates', self)
-        self.coordinateSystemButton.resize(30, 10)
         self.setFieldValuesButton = QPushButton('set field values', self)
         if magnet_status == MagnetState.OFF:
             self.setFieldButton = QPushButton('switch on field', self)
@@ -167,9 +194,21 @@ class VectorMagnetDialog(QWidget):
         if demagnetization_flag:
             self.demagnetizeCheckBox.setCheckState(Qt.Checked)
 
+        # Dropdown menu for stored vectors and buttons to store/remove vectors
+        self.storedVectorsComboBox = QComboBox()
+        items = list(self.stored_vectors)
+        items.insert(0, '')
+        self.storedVectorsComboBox.addItems(items)
+        self.storedVectorsComboBox.setEditable(False)
+        self.storedVectorsComboBox.setInsertPolicy(QComboBox.NoInsert)
+        self.storedVectorsAddButton = QPushButton('add vector', self)
+        self.storedVectorsRemoveButton = QPushButton('remove vector', self)
+
         
     def _init_layout(self):
-        """ Initialise container's widget layout. """
+        """ Initialise container's widget layout. 
+        
+        """
         # Set layout of upper part related to field and current values
         upperLayout = QGridLayout()
         upperLayout.addWidget(QLabel('Enter \U0001D435-Vector:'), 0, 1)
@@ -181,18 +220,19 @@ class VectorMagnetDialog(QWidget):
             upperLayout.addWidget(self.setpointBLabels[i], i + 1, 2)
             upperLayout.addWidget(self.setpointCurrentLabels[i], i + 1, 3, alignment = Qt.AlignLeft)
         
-        # Set layout of lower part related to switching on/off field and displaying coordinate system
-        fieldControlBoxLayout = QVBoxLayout()
-        fieldControlBoxLayout.addWidget(self.setFieldValuesButton)
-        fieldControlBoxLayout.addWidget(self.setFieldButton)
-        fieldControlBoxLayout.addWidget(self.fieldStatusLabel)
-        miscBoxLayout = QVBoxLayout()
-        miscBoxLayout.addWidget(self.coordinateSystemButton)
-        miscBoxLayout.addWidget(self.demagnetizeCheckBox)
-        miscBoxLayout.addWidget(self.labelMessages)
-        lowerLayout = QHBoxLayout()
-        lowerLayout.addLayout(fieldControlBoxLayout)
-        lowerLayout.addLayout(miscBoxLayout)
+        # Set layout of lower part, left side first
+        lowerLayout = QGridLayout()
+        lowerLayout.addWidget(self.storedVectorsComboBox, 0, 0, 1, 2)
+        lowerLayout.addWidget(self.setFieldValuesButton, 1, 0, 1, 2)
+        lowerLayout.addWidget(self.setFieldButton, 2, 0, 1, 2)
+        lowerLayout.addWidget(self.fieldStatusLabel, 3, 0, 1, 2)
+
+        # Set layout of lower part, right side second
+        lowerLayout.addWidget(self.storedVectorsAddButton, 0, 2)
+        lowerLayout.addWidget(self.storedVectorsRemoveButton, 0, 3)
+        lowerLayout.addWidget(self.coordinateSystemButton, 1, 2, 1, 2)
+        lowerLayout.addWidget(self.demagnetizeCheckBox, 2, 2, 1, 2)
+        lowerLayout.addWidget(self.labelMessages, 3, 2, 1, 2)
 
         # Combine upper and lower layout
         layout = QVBoxLayout(self)
@@ -208,10 +248,9 @@ class VectorMagnetDialog(QWidget):
 
 
     def _init_events(self):
+        """Initialise container's event handlers.
+
         """
-        Initialise container's event handlers.
-        """
-        """Initialise container's event handlers. """
         # User initiated events
         for input_field in self.polarCoordsLineEdit:
             input_field.returnPressed.connect(self.on_set_values_button_click)
@@ -223,11 +262,19 @@ class VectorMagnetDialog(QWidget):
             self.setFieldButton.clicked.connect(self.on_switch_on_field)
         else:
             self.setFieldButton.clicked.connect(self.on_switch_off_field)
+        self.storedVectorsComboBox.currentIndexChanged.connect(self.on_combo_box_index_change)
+        self.storedVectorsComboBox.editTextChanged.connect(self.synchroniser.emit_on_edit_text_changed_comboBox)
+        self.storedVectorsAddButton.clicked.connect(self.on_add_stored_vector_click)
+        self.storedVectorsRemoveButton.clicked.connect(self.on_remove_stored_vector_click)
 
         # synchroniser initiated events
-        self.synchroniser.on_input_fields_edited.connect(self.on_overall_input_field_text_edited)
-        self.synchroniser.on_correct_inputs.connect(self.on_correct_inputs)
-        self.synchroniser.on_invalid_inputs.connect(self.on_invalid_inputs)
+        self.synchroniser.on_input_fields_edited.connect(self.on_synch_overall_input_field_text_edited)
+        self.synchroniser.on_correct_inputs.connect(self.on_synch_correct_inputs)
+        self.synchroniser.on_invalid_inputs.connect(self.on_synch_invalid_inputs)
+        self.synchroniser.on_add_stored_vector.connect(self.storedVectorsComboBox.addItem)
+        self.synchroniser.on_remove_stored_vector.connect(self.storedVectorsComboBox.removeItem)
+        self.synchroniser.on_edit_text_changed_comboBox.connect(self.on_synch_edit_text_changed_comboBox)
+        self.synchroniser.on_index_changed_comboBox.connect(self.storedVectorsComboBox.setCurrentIndex)
 
         # Backend initiated events
         self.backend.on_single_current_change.connect(self.on_backend_single_current_change)
@@ -241,24 +288,26 @@ class VectorMagnetDialog(QWidget):
 
 
     def on_coord_system_button_click(self):
-        """Open pop up window for coordinate screen"""
+        """Open pop up window for coordinate screen.
+        
+        """
         self.w = CoordinatesPopUp(self.image_path_coord_system)
         self.w.show()
 
 
     def on_set_values_button_click(self):
         """Read input coordinates, check their validity and prepare to be set on the vector magnet.
+
         """
         print(f"GUI :: magnet :: on_set_values_button_click")
-        # get input polar coordinates
-        coords = [input_field.text() for input_field in self.polarCoordsLineEdit]
-
         # check validity, set field if valid and refuse if not valid
-        mask_validity = self.valid_inputs(coords)
+        mask_validity = self.valid_inputs(self.typed_inputs)
         if np.all(mask_validity):
             
             # transform inputs to floats and combine in an array
-            field_coords = np.array([float(coords[0]), float(coords[1]), float(coords[2])])
+            field_coords = np.array([   float(self.typed_inputs[0]), 
+                                        float(self.typed_inputs[1]), 
+                                        float(self.typed_inputs[2])])
 
             # try to update setpoint to provided values, catch custom exception raised when field is infeasible
             try:
@@ -277,9 +326,10 @@ class VectorMagnetDialog(QWidget):
             self.synchroniser.emit_on_invalid_inputs(mask_validity, 'Invalid values, check inputs!')
 
 
-    def on_correct_inputs(self):
+    def on_synch_correct_inputs(self):
         """Update the style of the input fields, erase error messages and 
         enable the button for switching on the field. 
+
         """
         # change color of all LineEdits back to original
         for input_field in  self.polarCoordsLineEdit:
@@ -290,9 +340,10 @@ class VectorMagnetDialog(QWidget):
         self.setFieldButton.setEnabled(True)
 
 
-    def on_invalid_inputs(self, mask_validity : np.ndarray, message : str):
+    def on_synch_invalid_inputs(self, mask_validity : np.ndarray, message : str):
         """Update the style of the input fields according to the provided mask, display the message and 
         disable the button for switching on the field, unless the field is already on. 
+
         """
         # update frame colors of LineEdits
         for i in range(3):
@@ -313,22 +364,55 @@ class VectorMagnetDialog(QWidget):
 
     def on_single_input_field_text_edited(self, *args):
         """Update class variable that contains the currently typed inputs and emit signal,
-        such that other instances of widget get notified, too. 
+        such that other instances of widget get notified, too. Directly check validity of 
+        inputs and inform user immediately. If one of the stored vectors is selected in the 
+        ComboBox and one of the field values is altered, set ComboBox to empty first line.
+
         """
+        # update class attribute that contains typed inputs and notify other instances
         self.typed_inputs[:] = [input_field.text() for input_field in self.polarCoordsLineEdit]
         self.synchroniser.emit_on_input_fields_edited(self.typed_inputs)
 
+        # check current inputs directly, but ignore empty lines
+        mask_validity = self.valid_inputs(self.typed_inputs)
+        mask_validity[self.typed_inputs == ''] = True
+        if np.all(mask_validity):
+            
+            try:
+                # transform inputs to floats and combine in an array
+                field_coords = np.array([float(self.typed_inputs[i]) for i in range(3)])
+            except ValueError:
+                pass
+            else:
+                # if the inputs are edited and do not correspond to currently chosen 
+                index_stored_vectors = self.storedVectorsComboBox.currentIndex()
+                label_stored_vector = self.storedVectorsComboBox.itemText(index_stored_vectors)
+                
+                # if typed input does not correspond to currently selected item of ComboBox, reset to blank first line
+                if index_stored_vectors > 0 and np.any(field_coords != self.stored_vectors[label_stored_vector]):
+                    self.synchroniser.emit_on_index_changed_comboBox(0)
 
-    def on_overall_input_field_text_edited(self, inputs : np.ndarray):
+            finally:
+                # notify all instances that current inputs are valid (up to empty inputs)
+                self.synchroniser.emit_on_correct_inputs()
+
+        else:
+            # notify all instances that current inputs are invalid 
+            self.synchroniser.emit_on_invalid_inputs(mask_validity, 'Invalid values, check inputs!')        
+
+
+    def on_synch_overall_input_field_text_edited(self, inputs : np.ndarray):
         """Input fields have been edited either in this widget instance or another one.
         Either way, update the text displayed in the input fields to synchronize all instances. 
+
         """
         for i in range(3):
             self.polarCoordsLineEdit[i].setText(inputs[i])
 
 
     def on_switch_on_field(self):
-        """Switch on vector magnet and set field values that are currently set as class variables.
+        """Switch on vector magnet.
+
         """
         # update variables
         self.labelMessages.setText('enabling field')
@@ -337,6 +421,7 @@ class VectorMagnetDialog(QWidget):
 
     def on_switch_off_field(self):
         """ Switch off vector magnet.
+
         """
         self.labelMessages.setText('disabling field')
         self.backend.disable_field()
@@ -375,7 +460,7 @@ class VectorMagnetDialog(QWidget):
         self.setFieldButton.setEnabled(True)
 
         # change color of all LineEdits back to original
-        for input_field in  self.polarCoordsLineEdit:
+        for input_field in self.polarCoordsLineEdit:
             input_field.setStyleSheet(self.polarCoordsLineEditStyleSheet)
 
         # erase any previous error messages
@@ -396,8 +481,8 @@ class VectorMagnetDialog(QWidget):
         """Measure applied currents and update label values.
 
         """
+        # get currents and set them to exactly zero if they are close to it to avoid '-0.000 A' labels
         currents = self.backend.get_currents()
-        # if current is close to zero set it to exactly zero to avoid '-0.000 A' labels
         currents[np.isclose(currents, 0, atol = 5e-4)] = 0
         self._update_current_labels(currents)
 
@@ -433,7 +518,8 @@ class VectorMagnetDialog(QWidget):
         """Update fieldStatusLabel according to new state.
 
         """
-        print('backend status change')
+        print('on_backend_status_change')
+
         if status == MagnetState.ON:
             # update fieldStatusLabel to have green background
             height = self.fieldStatusLabel.size().height()
@@ -472,18 +558,127 @@ class VectorMagnetDialog(QWidget):
             self.on_timer_current_update()
 
 
+    def on_synch_edit_text_changed_comboBox(self, text):
+        """Update text displayed in ComboBox after it has been changed in this or another instance.
+
+        """
+        if self.storedVectorsComboBox.currentText() != text:
+            self.storedVectorsComboBox.setEditText(text)
+
+
+    def on_add_stored_vector_click(self):
+        """Enable editing in the LineEdit of the ComboBox, such that the label of a new vector 
+        can be entered. The slot and displayed rext related to the button storedVectorsAddButton are updated accordingly. 
+        """   
+        # enable editing of combo box and set the focus on it. 
+        self.storedVectorsComboBox.setEditable(True)
+        self.storedVectorsComboBox.setCurrentText('')
+        self.storedVectorsComboBox.setFocus()
+
+        # connect line edit of combo box. Note that the LineEdit get defined only when combobox is set to editable.
+        self.storedVectorsComboBox.lineEdit().returnPressed.connect(self.on_add_stored_vector_label_confirmed)
+
+        # re-define button to indicate that something else happens now
+        self.storedVectorsAddButton.clicked.disconnect()
+        self.storedVectorsAddButton.clicked.connect(self.on_add_stored_vector_label_confirmed)
+        self.storedVectorsAddButton.setText('confirm label')
+
+
+    def on_add_stored_vector_label_confirmed(self):
+        """Take the currently entered text in QComboBox as key to store a new vector, 
+        provided that the current field values are valid and the label is not empty.
+
+        """
+        # check validity of currently typed field values first
+        mask_validity = self.valid_inputs(self.typed_inputs)
+        if np.all(mask_validity):
+            # emit signal to announce an successful input to all widget instances 
+            self.synchroniser.emit_on_correct_inputs()
+
+            # get suggested label
+            label_new_item = self.storedVectorsComboBox.currentText()
+
+            # check whether label is already an item of the combo box
+            if label_new_item in list(self.stored_vectors):
+                # notify user that the label already exists
+                self.labelMessages.setText('Label exists already.')
+
+            elif label_new_item == '':
+                # notify user that the label already exists
+                self.labelMessages.setText('Label must not be empty.')
+
+            else:       
+                # add new item as key to stored vectos and associate currently entered vector to it.
+                self.stored_vectors[label_new_item] = self.typed_inputs.astype(float)
+
+                # update the json file accordingly
+                self.dump_stored_vectors(self.file_path_stored_vectors, self.stored_vectors)
+                
+                # announce update of stored vectors to all instances by emitting a signal 
+                self.synchroniser.emit_on_add_stored_vector(label_new_item)
+
+                # set index to last item, which just got added
+                self.synchroniser.emit_on_index_changed_comboBox(self.storedVectorsComboBox.count() - 1)
+
+                # make combo box unchangeable again, this should also delete the associated label
+                self.storedVectorsComboBox.setEditable(False)
+
+                # re-define button to add vectors, return to initial settings
+                self.storedVectorsAddButton.clicked.disconnect()
+                self.storedVectorsAddButton.clicked.connect(self.on_add_stored_vector_click)
+                self.storedVectorsAddButton.setText('add vector')
+        
+        else:
+            # emit signal to announce invalid input to all widget instances 
+            self.synchroniser.emit_on_invalid_inputs(mask_validity, 'Invalid values, check inputs!')
+
+
+    def on_remove_stored_vector_click(self):
+        """Remove the currently selected stored vector from the suggestions displayed in the QComboBox, 
+        from the class attribute that keeps track of all stored vectors and the file that stores
+        all vectors for later use. 
+
+        """
+        index_of_removal = self.storedVectorsComboBox.currentIndex()
+
+        # first index corresponds to empty line
+        if index_of_removal > 0:
+            # remove item from dictionary
+            self.stored_vectors.pop(self.storedVectorsComboBox.itemText(index_of_removal))
+
+            # update the json file accordingly
+            self.dump_stored_vectors(self.file_path_stored_vectors, self.stored_vectors)
+
+            # notify all instances to remove the respective item
+            self.synchroniser.emit_on_remove_stored_vector(index_of_removal)
+
+
+    def on_combo_box_index_change(self, index : int):
+        """Update the text of the input fields accordingly if a stored vector has been selected.
+
+        :param index: index of currently selected item of ComboBox
+        """
+        number_items = self.storedVectorsComboBox.count() 
+
+        # update input fields according to chosen vector, first index corresponds to emtpy key so ignore this case
+        if index > 0:
+            self.typed_inputs[:] = self.stored_vectors[self.storedVectorsComboBox.currentText()]
+            self.synchroniser.emit_on_input_fields_edited(self.typed_inputs)
+        
+        # notify other instances of instance change
+        self.synchroniser.emit_on_index_changed_comboBox(index)
+
+
     @staticmethod
     def valid_inputs(values):
-        """
-        Test whether all values are valid float values and whether the angles are correct.
+        """Test validity of input field values.
+        Accepted ranges: 0 <= magnitude; 0 <= theta <= 180; 0 <= phi < 360
 
-        Args:
-            values (list): [magnitude, theta, phi] is a list of length 3 containing spherical
-                           coordinates of desired field. Accepted ranges: 0 <= magnitude;
-                           0 <= theta <= 180; 0 <= phi < 360
+        :param values: input spherical coordinates [magnitude, theta, phi]
+        :type current_vector: np.ndarray or list of length 3
 
-        Returns:
-            nd-array of bools: True if a vlaue is valid and False otherwise, keeps the same order as in values
+        :returns: mask with True for valid and False for invalid entries 
+        :rtype: boolean np.ndarray of length 3
         """
         mask_validity = np.ones(3, dtype=bool)
         for i, v in enumerate(values):
@@ -503,6 +698,46 @@ class VectorMagnetDialog(QWidget):
                     mask_validity[i] = False
 
         return mask_validity
+
+
+    @staticmethod
+    def dump_stored_vectors(file_path : str, vector_dictionary : dict):
+        """Save vectors in a json-file.
+
+        :param file_path: path of json-file that contains previously stored vectors.
+        :param dictionary: dictionary containing labels of field vectors as keys and 
+            vectors as values
+        """
+        # ensure that values of dictionary are lists rather than ndarrays
+        for label, vector in vector_dictionary.items():
+            vector_dictionary[label] = list(vector)
+
+        with open(file_path, 'w') as write_file:
+            json.dump(vector_dictionary, write_file, indent = 4) 
+
+
+    @staticmethod
+    def load_stored_vectors(file_path : str) -> dict:
+        """Retrieve stored vectors from json-file and return dict. 
+
+        :param file_path: path of json-file that contains previously stored vectors.
+        :type file_path: str
+
+        :returns: dictionary containing labels of vectors as keys and vectors keys, 
+                where vectors are ndarrays
+        """
+        # extract dictionary from json file 
+        try:
+            with open(file_path, 'r') as read_file:
+                stored_vectors = json.load(read_file)
+        except FileNotFoundError:
+            stored_vectors = {}
+
+        # convert lists to ndarrays
+        for label, vector in stored_vectors.items():
+            stored_vectors[label] = np.array(vector)
+        
+        return stored_vectors
 
 
 class CoordinatesPopUp(QWidget):
@@ -535,7 +770,10 @@ if __name__ == '__main__':
     # backend = ElectroMagnetBackend()
 
     with VectorMagnetDialog(backend) as dialog:
-        dialog.show()
+        with VectorMagnetDialog(backend) as dialog2:
 
-        sys.exit(app.exec_())
-# %%
+            dialog.show()
+            dialog2.show()
+
+            sys.exit(app.exec_())
+
