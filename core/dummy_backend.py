@@ -97,6 +97,9 @@ class DummyMagnetBackend(MagnetBackendBase):
 
         """
         self._demagnetization_flag = flag
+        
+        # notify UI that flag has been changed successfully 
+        self.on_demagnetization_flag_change.emit(flag)
 
     
     def get_demagnetization_flag(self) -> bool:
