@@ -560,7 +560,6 @@ class VectorMagnetDialog(QWidget):
 
     def on_synch_edit_text_changed_comboBox(self, text):
         """Update text displayed in ComboBox after it has been changed in this or another instance.
-
         """
         if self.storedVectorsComboBox.currentText() != text:
             self.storedVectorsComboBox.setEditText(text)
