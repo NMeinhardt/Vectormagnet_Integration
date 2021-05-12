@@ -46,10 +46,6 @@ def save_results(directory, currents, voltages, fields_mean, fields_std, data_fi
     df.to_csv(file_path, index=False, header=True) 
 
 
-# 
-# ToDo: 
-# - in middle of poles for all coils 
-
 #%% 
 # (1): Set up measurement
 # initialize settings
