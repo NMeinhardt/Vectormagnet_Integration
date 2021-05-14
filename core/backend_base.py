@@ -172,12 +172,13 @@ class MagnetBackendBase(QObject):
             if np.any(required_currents > self.get_max_current()):
                 raise CurrentLimitExceeded
 
+            # notify UI that setpoint has been changed successfully 
+            self.on_field_setpoint_change.emit(spherical_values)
+            
             # set required currents
             self.set_currents(required_currents)
             self._setpoint_fields = cartesian_values
 
-            # notify UI that setpoint has been changed successfully 
-            self.on_field_setpoint_change.emit(spherical_values)
 
     @staticmethod
     def spherical_to_cartesian(spherical_coords: np.ndarray) -> np.ndarray:

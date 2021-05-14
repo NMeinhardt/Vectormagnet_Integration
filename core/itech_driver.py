@@ -2,7 +2,8 @@ import socket
 from time import sleep, time
 from threading import RLock
 import enum
-import logging as logger
+import logging 
+logging.basicConfig(level=logging.DEBUG)
 
 
 
@@ -74,13 +75,12 @@ class ITPowerSupplyDriver(object):
         """Connect to the device
 
         """
-        logger.debug(f'DRV :: IT6432 :: connect :: CH {self._channel}')
-        print(f'DRV :: IT6432 :: connect :: CH {self._channel}')
+        logging.debug(f'DRV :: IT6432 :: connect :: CH {self._channel}')
         try:
             self._sock.connect((self._host, self._port))
 
         except Exception as err:
-            logger.error(err)
+            logging.error(err)
 
         else:
             self._connected = True
@@ -94,7 +94,7 @@ class ITPowerSupplyDriver(object):
     def close(self):
         """Closes the socket connection
         """
-        logger.debug(f'DRV :: IT6432 :: close :: CH {self._channel}')
+        logging.debug(f'DRV :: IT6432 :: close :: CH {self._channel}')
         self._sock.close()
 
 
@@ -113,11 +113,9 @@ class ITPowerSupplyDriver(object):
         cmd += self._read_termination
         try:
             with self.lock_sending:
-                # print(f'(ch {self._channel}): >> {cmd[:-1]}')
                 self._sock.sendall(cmd.encode('ascii'))
         except (ConnectionResetError, ConnectionError, ConnectionRefusedError, ConnectionAbortedError) as err:
-            print(f'error on (ch {self._channel}) in _send: cmd= {cmd[:-1]}')
-            logger.error(err)
+            logging.error(f'error on (ch {self._channel}) in _send: cmd= {cmd[:-1]}, err= {err}')
 
         if check_error:
             self.checkError()
@@ -157,16 +155,14 @@ class ITPowerSupplyDriver(object):
                     pass
 
         except socket.timeout:
-            logger.debug(f'{__name__} Timeout occurred on CH {self._channel}')
+            logging.error(f'DRV :: IT6432 :: {__name__} Timeout occurred on CH {self._channel}')
             return ''
 
         try:
             res = chunk.decode('ascii').strip('\n')
         except UnicodeDecodeError:
             res = chunk.decode('uft8').strip('\n')
-            logger.error(f'{__name__} Non-ascii string received on CH {self._channel}: {res}')
-
-        # print(f'(ch {self._channel}): << {res}')
+            logging.error(f'DRV :: IT6432 :: {__name__} Non-ascii string received on CH {self._channel}: {res}')
 
         if check_error:
             self.checkError()
@@ -202,14 +198,15 @@ class ITPowerSupplyDriver(object):
     def clrOutputProt(self):
         """Clear output protection of current supply.
         """
-        logger.debug(f'DRV :: IT6432 :: clrOutputProt on CH {self._channel}')
+
+        logging.debug(f'DRV :: IT6432 :: clrOutputProt on CH {self._channel}')
         self._send('output:protection:clear')
 
 
     def clrErrorQueue(self):
         """Clear all errors from the instrument error queue
         """
-        logger.debug(f'DRV :: IT6432 :: clrErrorQueue on CH {self._channel}')
+        logging.debug(f'DRV :: IT6432 :: clrErrorQueue on CH {self._channel}')
         self._send('system:clear', check_error=False)
 
 
@@ -355,7 +352,7 @@ class ITPowerSupplyDriver(object):
 
         if current_lim > self.MAX_CURR:
             self.current_lim = self.MAX_CURR
-            logger.debug(f'DRV :: IT6432 :: set_maximum_current :: Current limit cannot be higher than {self.MAX_CURR} A')
+            logging.debug(f'DRV :: IT6432 :: set_maximum_current :: Current limit cannot be higher than {self.MAX_CURR} A')
         else:
             self.current_lim = current_lim
 
@@ -375,7 +372,7 @@ class ITPowerSupplyDriver(object):
 
         if voltage_lim > self.MAX_VOLT:
             self.voltage_lim = self.MAX_VOLT
-            logger.debug(f'DRV :: IT6432 :: set_maximum_voltage :: Voltage limit cannot be higher than {self.MAX_VOLT} V')
+            logging.debug(f'DRV :: IT6432 :: set_maximum_voltage :: Voltage limit cannot be higher than {self.MAX_VOLT} V')
         else:
             self.voltage_lim = voltage_lim
 
@@ -415,9 +412,9 @@ class ITPowerSupplyDriver(object):
             try:
                 error_code = int(response)
             except ValueError:
-                logger.error(f'DRV :: IT6432 :: checkError :: channel = {self._channel}, response = {response}')
+                logging.error(f'DRV :: IT6432 :: checkError :: channel = {self._channel}, response = {response}')
             except Exception as e:
-                logger.error(f'DRV :: IT6432 :: checkError :: channel = {self._channel}, response = {response} - {type(e)}: {e}')
+                logging.error(f'DRV :: IT6432 :: checkError :: channel = {self._channel}, response = {response} - {type(e)}: {e}')
             else:
                 if int(error_code) != 0 and int(error_code) != 224:
                     raise self._ErrorFactory(int(error_code), f'(ch {self._channel}): no message provided')
@@ -482,8 +479,7 @@ class GenericError(ErrorBase):
 
     def __init__(self, code, msg, *args, **kwargs):
         ErrorBase.__init__(self, code, *args, msg=msg, **kwargs)
-        logger.error(f'{code}: {msg}')
-        print(f'\n{code}: {msg}')
+        logging.error(f'{code}: {msg}')
 
 
 class ParameterOverflow(ErrorBase):

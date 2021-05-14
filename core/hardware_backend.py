@@ -319,6 +319,7 @@ class CurrentRampingHardwareThread(threading.Thread):
         # if desired run the demagnetization procedure first
         if self._demagnetization_flag and not np.isclose(0, initial_current, atol=0.01):
             self._demagnetization_procedure()
+        self._demagnetization_passed = True
         
         # ensure device works in voltage compliance, take an intermediate step if this isn't the case yet
         self._ensure_voltage_compliance(initial_current)
@@ -431,9 +432,6 @@ class CurrentRampingHardwareThread(threading.Thread):
 
             # ensure that vertex is actually approached
             sleep(0.1)
-
-        self._demagnetization_passed = True
-
 
 
 if __name__ == "__main__":

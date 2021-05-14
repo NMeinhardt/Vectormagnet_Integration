@@ -7,6 +7,8 @@ from datetime import datetime
 from time import sleep, time
 import numpy as np
 import json
+import logging 
+logging.basicConfig(level=logging.DEBUG)
 
 from PyQt5 import QtGui
 from PyQt5.QtCore import (QObject, QRunnable, Qt, QThreadPool, pyqtSignal,
@@ -119,7 +121,7 @@ class VectorMagnetDialog(QWidget):
     def __exit__(self, exc_type, exc_value, traceback):
         """ Ensure that connection to channels is closed. """
         self.backend.disable_field()
-        print('connection closed.')
+        logging.debug(f'GUI :: magnet :: __exit__')
 
 
     def _init_widgets(self):
@@ -299,7 +301,8 @@ class VectorMagnetDialog(QWidget):
         """Read input coordinates, check their validity and prepare to be set on the vector magnet.
 
         """
-        print(f"GUI :: magnet :: on_set_values_button_click")
+        logging.debug(f'GUI :: magnet :: on_set_values_button_click')
+
         # check validity, set field if valid and refuse if not valid
         mask_validity = self.valid_inputs(self.typed_inputs)
         if np.all(mask_validity):
@@ -309,6 +312,9 @@ class VectorMagnetDialog(QWidget):
                                         float(self.typed_inputs[1]), 
                                         float(self.typed_inputs[2])])
 
+            # emit signal to announce an successful input to all widget instances 
+            self.synchroniser.emit_on_correct_inputs()
+
             # try to update setpoint to provided values, catch custom exception raised when field is infeasible
             try:
                 self.backend.set_target_field(field_coords)
@@ -316,10 +322,7 @@ class VectorMagnetDialog(QWidget):
                 # emit signal to announce that the desired vector is infeasible to all widget instances 
                 mask_infeasible_mag = np.array([False, True, True])
                 message_infeasible_mag = 'Currents would exceed limits,\ntry smaller magnitude.'
-                self.synchroniser.emit_on_invalid_inputs(mask_infeasible_mag, message_infeasible_mag)
-            else:
-                # emit signal to announce an successful input to all widget instances 
-                self.synchroniser.emit_on_correct_inputs()
+                self.synchroniser.emit_on_invalid_inputs(mask_infeasible_mag, message_infeasible_mag)              
                 
         else:
             # emit signal to announce invalid input to all widget instances 
@@ -331,6 +334,7 @@ class VectorMagnetDialog(QWidget):
         enable the button for switching on the field. 
 
         """
+        logging.debug(f'GUI :: magnet :: on_synch_correct_inputs') 
         # change color of all LineEdits back to original
         for input_field in  self.polarCoordsLineEdit:
             input_field.setStyleSheet(self.polarCoordsLineEditStyleSheet)
@@ -451,6 +455,7 @@ class VectorMagnetDialog(QWidget):
         the field setpoint, use this function to erase any displayed error messages. 
 
         """
+        # logging.debug(f'GUI :: magnet :: on_backend_field_setpoint_change: {spherical_coords}') 
         # update labels dispaying the field setpoint
         for j in range(3):
             unit = 'mT' if j == 0 else '°'
@@ -502,6 +507,8 @@ class VectorMagnetDialog(QWidget):
         """Update Message  according to new task.
 
         """
+        logging.debug(f'GUI :: magnet :: on_backend_task_change: {task}') 
+
         if task == CurrentTask.IDLE:
             self.labelMessages.setText('')
         elif task == CurrentTask.ENABLING:
@@ -518,7 +525,7 @@ class VectorMagnetDialog(QWidget):
         """Update fieldStatusLabel according to new state.
 
         """
-        print('on_backend_status_change')
+        # logging.debug(f'GUI :: magnet :: on_backend_status_change: {status}')
 
         if status == MagnetState.ON:
             # update fieldStatusLabel to have green background

@@ -2,6 +2,8 @@ import numpy as np
 import threading 
 from time import sleep
 from PyQt5.QtCore import pyqtSignal
+import logging 
+logging.basicConfig(level=logging.DEBUG)
 
 from core.backend_base import MagnetBackendBase, ObserverThread
 from core.backend_base import MAGNET_STATE as MagnetState
@@ -41,7 +43,7 @@ class DummyMagnetBackend(MagnetBackendBase):
     def __del__(self):
         """Shut down 
         """
-        print('Shutdown dummy backend')
+        logging.debug(f'BAK :: magnet ({self.name})) :: Shutdown')
 
     def get_currents(self) -> np.ndarray:
         """Returns currents of (dummy) power supplies.
@@ -55,6 +57,7 @@ class DummyMagnetBackend(MagnetBackendBase):
 
         :param values: Current values to be set.
         """
+        logging.debug(f'BAK :: magnet ({self.name})) :: set_currents: {values}')
         self._setpoint_currents = values
 
         if self._magnet_state == MagnetState.ON:
@@ -66,6 +69,7 @@ class DummyMagnetBackend(MagnetBackendBase):
         """Enables magnetic field.
 
         """
+        logging.debug(f'BAK :: magnet ({self.name})) :: enable_field')
         self.on_field_status_change.emit(MagnetState.ON)
         self._magnet_state = MagnetState.ON
 
@@ -77,6 +81,7 @@ class DummyMagnetBackend(MagnetBackendBase):
         """Disables magnetic field.
 
         """
+        logging.debug(f'BAK :: magnet ({self.name})) :: disable_field')
         # change state and emit signal to notify gui layer 
         self._magnet_state = MagnetState.OFF
         self.on_field_status_change.emit(MagnetState.OFF)
@@ -96,6 +101,7 @@ class DummyMagnetBackend(MagnetBackendBase):
         """Sets the demagnetization flag.
 
         """
+        logging.debug(f'BAK :: magnet ({self.name})) :: set_demagnetization_flag: {flag}')
         self._demagnetization_flag = flag
         
         # notify UI that flag has been changed successfully 
@@ -120,7 +126,7 @@ class DummyMagnetBackend(MagnetBackendBase):
         """React on a finished task by emitting on_task_change signal. 
         If the finished task was to disable the magnet, additionally emit on_field_status_change signal.
         """
-
+        logging.debug(f'BAK :: magnet ({self.name})) :: on_task_finished_action: {finished_task}')
         if finished_task == CurrentTask.DEMAGNETIZING:
             # demagnetization is done, notify UI that a new field might be set now.
             self.on_task_change.emit(CurrentTask.ENABLING)
@@ -131,6 +137,7 @@ class DummyMagnetBackend(MagnetBackendBase):
         else:
             # either CurrentTask.ENABLING or CurrentTask.SWITCHING is done, notify UI that nothing more happens
             self.on_task_change.emit(CurrentTask.IDLE)
+
 
     def _ramp_to_new_current_values(self, target_currents: np.ndarray, running_task : CurrentTask, emit_signals_flag = True):
         """Ramp output current from the currently set current values to a new target value. 
@@ -224,6 +231,7 @@ class CurrentRampingThread(threading.Thread):
         # if desired run the demagnetization procedure first
         if self._demagnetization_flag and not np.isclose(0, self._target_array[self._channel]):
             self._demagnetization_procedure()
+        self._demagnetization_passed = True
 
         # estimate current distance to target and set step size
         step_size = (self._target_value - self._target_array[self._channel]) / self._number_steps
@@ -298,4 +306,3 @@ class CurrentRampingThread(threading.Thread):
             # this sleep is also in hardware backend to ensure that vertex is actually approached
             sleep(0.1)
 
-        self._demagnetization_passed = True
